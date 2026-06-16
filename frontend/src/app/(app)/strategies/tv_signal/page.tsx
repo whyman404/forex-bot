@@ -109,8 +109,9 @@ export default function TVSignalStrategyPage(): React.ReactElement {
 
   // First symbol becomes default selection.
   React.useEffect(() => {
-    if (!symbol && symbols.data && symbols.data.length > 0) {
-      setSymbol(symbols.data[0].code);
+    const first = symbols.data?.[0];
+    if (!symbol && first) {
+      setSymbol(first.code);
     }
   }, [symbols.data, symbol]);
 
