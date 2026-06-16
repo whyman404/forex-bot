@@ -1,0 +1,98 @@
+# Default strategy parameters.
+# Each user instance can override via per-account YAML or via the UI.
+#
+# NOTE on tuning: these defaults were chosen from convention + literature,
+# NOT from in-sample optimization. Do not aggressively curve-fit per-user;
+# walk-forward analysis (`backtest/walk_forward.py`) is your only honest
+# guide.
+
+london_breakout:
+  symbol: XAUUSD
+  timeframe: M15
+  params:
+    buffer_pips: 5.0
+    sl_pips: 40.0
+    tp_pips: 60.0
+    tp_mode: fixed             # 'fixed' or 'range_mult'
+    tp_range_mult: 1.5
+    min_range_pips: 30.0
+    max_range_pips: 200.0
+    spread_filter_pts: 30
+    max_trades_per_day: 1
+  risk_per_trade_pct: 1.0
+  enabled: true
+
+ny_killzone:
+  symbol: XAUUSD
+  timeframe: M5
+  params:
+    sl_pips: 30.0
+    tp_pips: 60.0
+    max_trades_per_day: 1
+    spread_filter_pts: 30
+  risk_per_trade_pct: 1.0
+  enabled: true
+
+ema_adx_trend:
+  symbol: XAUUSD
+  timeframe: H1
+  params:
+    ema_period: 50
+    adx_period: 14
+    adx_threshold: 25.0
+    atr_period: 14
+    sl_atr_mult: 1.5
+    tp_atr_mult: 3.0
+    use_trailing_atr: false
+    trail_atr_mult: 2.0
+  risk_per_trade_pct: 1.0
+  enabled: true
+
+ema_rsi_swing:
+  symbol: BTCUSDT
+  timeframe: H4
+  params:
+    ema_fast: 12
+    ema_slow: 26
+    rsi_period: 14
+    rsi_threshold: 50.0
+    swing_lookback: 10
+    sl_pct_cap: 0.03
+    tp_pct_cap: 0.06
+    use_trailing_ema: true
+  risk_per_trade_pct: 1.0
+  enabled: true
+
+donchian_breakout:
+  symbol: BTCUSDT
+  timeframe: H1
+  params:
+    entry_period: 20
+    exit_period: 10
+    risk_per_trade_pct: 2.0
+  enabled: true
+
+grid_bot:
+  symbol: BTCUSDT
+  timeframe: M15
+  params:
+    center_mode: vwap          # 'vwap' or 'ema50'
+    ema_period: 50
+    n_levels: 10
+    spacing_pct: 0.01
+    tp_pct: 0.01
+    hard_sl_pct: 0.15          # NEVER set to 0 — that's the bomb defuser.
+    rebalance_hourly: false
+  risk_per_trade_pct: 0.5      # per leg; total exposure can be 10x this
+  enabled: true                 # set false if not in mean-reverting regime
+
+# ---------------------------------------------------------------------------
+# Account-level risk limits applied to ALL strategies above.
+# ---------------------------------------------------------------------------
+risk:
+  max_risk_per_trade_pct: 2.0
+  max_daily_loss_pct: 5.0
+  max_drawdown_pct: 15.0       # circuit breaker — auto-disable on hit
+  max_open_positions: 6
+  max_positions_per_symbol: 1
+  correlated_symbol_limit: 2

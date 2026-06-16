@@ -1,0 +1,230 @@
+# ============================================================================
+# infra/prometheus/rules/slo-alerts.yml
+# ============================================================================
+# SLO-based alerts. Multi-window multi-burn-rate (Google SRE Workbook §5).
+# Every alert MUST have a runbook URL — that's our convention.
+# ============================================================================
+
+groups:
+  - name: slo.api_availability
+    interval: 30s
+    rules:
+      # === SLI: success ratio of /api/* requests (non-5xx) ===
+      - record: sli:api_requests:rate5m
+        expr: |
+          sum(rate(http_requests_total{service="backend"}[5m]))
+      - record: sli:api_errors:rate5m
+        expr: |
+          sum(rate(http_requests_total{service="backend",status=~"5.."}[5m]))
+      - record: sli:api_error_ratio:5m
+        expr: |
+          sli:api_errors:rate5m / clamp_min(sli:api_requests:rate5m, 1)
+
+      # === Multi-burn-rate alerts (SLO: 99.5% over 30d, error budget 0.5%) ===
+      # Fast burn: 2% budget in 1h (14.4x burn rate)
+      - alert: APIAvailabilityFastBurn
+        expr: |
+          (
+            sli:api_error_ratio:5m > (14.4 * 0.005)
+          )
+          and
+          (
+            sum(rate(http_requests_total{service="backend",status=~"5.."}[1h]))
+            /
+            sum(rate(http_requests_total{service="backend"}[1h]))
+            > (14.4 * 0.005)
+          )
+        for: 2m
+        labels:
+          severity: page
+          slo: api_availability
+          team: devops
+        annotations:
+          summary: "API error budget burning fast (>14.4x SLO)"
+          description: "5xx ratio is {{ $value | humanizePercentage }} — burns 2% of 30d budget in 1h."
+          runbook_url: "https://github.com/your-org/forex-bot/blob/main/docs/deployment/runbooks/incident-triage.md"
+          dashboard_url: "https://grafana.forex-bot.app/d/api-overview"
+
+      # Slow burn: 10% budget in 6h (6x burn rate)
+      - alert: APIAvailabilitySlowBurn
+        expr: |
+          (
+            sum(rate(http_requests_total{service="backend",status=~"5.."}[30m]))
+            /
+            sum(rate(http_requests_total{service="backend"}[30m]))
+            > (6 * 0.005)
+          )
+          and
+          (
+            sum(rate(http_requests_total{service="backend",status=~"5.."}[6h]))
+            /
+            sum(rate(http_requests_total{service="backend"}[6h]))
+            > (6 * 0.005)
+          )
+        for: 15m
+        labels:
+          severity: ticket
+          slo: api_availability
+          team: devops
+        annotations:
+          summary: "API error budget burning slowly (>6x SLO)"
+          description: "5xx ratio is sustained — 10% of 30d budget in 6h."
+          runbook_url: "https://github.com/your-org/forex-bot/blob/main/docs/deployment/runbooks/incident-triage.md"
+
+  - name: slo.api_latency
+    interval: 30s
+    rules:
+      - record: sli:api_latency:p95_5m
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(http_request_duration_seconds_bucket{service="backend"}[5m]))
+          )
+      - alert: APILatencyP95High
+        expr: sli:api_latency:p95_5m > 0.5
+        for: 10m
+        labels:
+          severity: page
+          slo: api_latency
+          team: devops
+        annotations:
+          summary: "API p95 latency > 500ms"
+          description: "p95 = {{ $value }}s — investigate slow queries / dependencies."
+          runbook_url: "https://github.com/your-org/forex-bot/blob/main/docs/deployment/runbooks/incident-triage.md"
+
+  - name: slo.signal_to_order_latency
+    interval: 30s
+    rules:
+      - record: sli:signal_to_order:p95_5m
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(signal_to_order_latency_seconds_bucket[5m]))
+          )
+      - alert: SignalToOrderLatencyHigh
+        expr: sli:signal_to_order:p95_5m > 2.0
+        for: 5m
+        labels:
+          severity: page
+          slo: signal_to_order
+          team: devops
+        annotations:
+          summary: "Signal→Order latency p95 > 2s"
+          description: "p95 = {{ $value }}s. Likely MT5 supervisor lag or queue depth."
+          runbook_url: "https://github.com/your-org/forex-bot/blob/main/docs/deployment/runbooks/mt5-disconnect.md"
+
+  - name: mt5.heartbeat
+    interval: 15s
+    rules:
+      - alert: MT5SupervisorDown
+        expr: |
+          up{service="mt5-supervisor"} == 0
+          or
+          (time() - mt5_supervisor_last_heartbeat_timestamp_seconds) > 60
+        for: 1m
+        labels:
+          severity: page
+          team: devops
+          impact: trading_halted
+        annotations:
+          summary: "MT5 supervisor offline — live trading halted"
+          description: "No heartbeat for >60s. Auto kill-switch should engage; verify."
+          runbook_url: "https://github.com/your-org/forex-bot/blob/main/docs/deployment/runbooks/mt5-disconnect.md"
+
+      - alert: MT5BrokerConnectionLost
+        expr: mt5_broker_connected == 0
+        for: 30s
+        labels:
+          severity: page
+          team: devops
+          impact: orders_rejected
+        annotations:
+          summary: "MT5 lost connection to Exness broker"
+          description: "Open positions are stale. Pause new orders, reconcile fills."
+          runbook_url: "https://github.com/your-org/forex-bot/blob/main/docs/deployment/runbooks/mt5-disconnect.md"
+
+  - name: risk.kill_switch
+    interval: 15s
+    rules:
+      - alert: DailyLossLimitHit
+        expr: |
+          increase(account_daily_pnl_usd{result="loss"}[1m]) > 0
+          and
+          account_daily_pnl_usd <= account_daily_loss_limit_usd
+        for: 0s
+        labels:
+          severity: page
+          team: devops
+          impact: kill_switch_engaged
+        annotations:
+          summary: "Daily loss limit hit — kill switch engaged"
+          description: "Account {{ $labels.account_id }}: pnl={{ $value }}. New orders paused."
+          runbook_url: "https://github.com/your-org/forex-bot/blob/main/docs/deployment/runbooks/kill-switch-mass.md"
+
+      - alert: MaxDrawdownExceeded
+        expr: account_max_drawdown_pct > 20
+        for: 1m
+        labels:
+          severity: page
+          team: devops
+        annotations:
+          summary: "Account drawdown > 20%"
+          description: "Drawdown = {{ $value }}%. Review strategy config."
+          runbook_url: "https://github.com/your-org/forex-bot/blob/main/docs/deployment/runbooks/kill-switch-mass.md"
+
+  - name: infrastructure
+    interval: 30s
+    rules:
+      - alert: DiskUsageHigh
+        expr: |
+          (1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} /
+                node_filesystem_size_bytes{fstype!~"tmpfs|overlay"})) > 0.8
+        for: 5m
+        labels:
+          severity: ticket
+          team: devops
+        annotations:
+          summary: "Disk usage > 80% on {{ $labels.instance }}"
+          description: "Mount {{ $labels.mountpoint }} at {{ $value | humanizePercentage }}."
+          runbook_url: "https://github.com/your-org/forex-bot/blob/main/docs/deployment/runbooks/incident-triage.md"
+
+      - alert: DiskUsageCritical
+        expr: |
+          (1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} /
+                node_filesystem_size_bytes{fstype!~"tmpfs|overlay"})) > 0.9
+        for: 1m
+        labels:
+          severity: page
+          team: devops
+        annotations:
+          summary: "Disk usage > 90% — service degradation imminent"
+          runbook_url: "https://github.com/your-org/forex-bot/blob/main/docs/deployment/runbooks/incident-triage.md"
+
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: page
+          team: devops
+        annotations:
+          summary: "Postgres unreachable"
+          runbook_url: "https://github.com/your-org/forex-bot/blob/main/docs/deployment/runbooks/db-failover.md"
+
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 1m
+        labels:
+          severity: page
+          team: devops
+        annotations:
+          summary: "Redis unreachable — sessions and queue affected"
+          runbook_url: "https://github.com/your-org/forex-bot/blob/main/docs/deployment/runbooks/incident-triage.md"
+
+      - alert: QueueDepthHigh
+        expr: redis_list_length{key=~"queue:.*"} > 1000
+        for: 5m
+        labels:
+          severity: ticket
+          team: devops
+        annotations:
+          summary: "Queue {{ $labels.key }} depth > 1000"
+          description: "Workers may be lagging or down."
+          runbook_url: "https://github.com/your-org/forex-bot/blob/main/docs/deployment/runbooks/incident-triage.md"

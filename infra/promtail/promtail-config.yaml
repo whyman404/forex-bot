@@ -1,0 +1,64 @@
+# ============================================================================
+# infra/promtail/promtail-config.yaml
+# ============================================================================
+# Ships every docker container's stdout/stderr to Loki, tagged with the
+# `service` and `env` labels set in docker-compose.
+# ============================================================================
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+    backoff_config:
+      min_period: 1s
+      max_period: 30s
+      max_retries: 10
+    batchsize: 1048576
+    batchwait: 1s
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+    relabel_configs:
+      - source_labels: ["__meta_docker_container_label_service"]
+        target_label: service
+      - source_labels: ["__meta_docker_container_label_env"]
+        target_label: env
+      - source_labels: ["__meta_docker_container_name"]
+        regex: "/(.*)"
+        target_label: container
+      - source_labels: ["__meta_docker_container_log_stream"]
+        target_label: stream
+      - action: replace
+        replacement: docker
+        target_label: source
+    pipeline_stages:
+      # FastAPI/structlog emits structured JSON. Parse and lift common fields.
+      - json:
+          expressions:
+            level: level
+            ts: timestamp
+            request_id: request_id
+            event: event
+            error: error
+          drop_malformed: true
+      - labels:
+          level:
+          request_id:
+      - timestamp:
+          source: ts
+          format: RFC3339Nano
+          fallback_formats:
+            - RFC3339
+            - Unix
+      # Drop noisy access logs at DEBUG level.
+      - match:
+          selector: '{level="DEBUG"} |= "GET /healthz"'
+          action: drop

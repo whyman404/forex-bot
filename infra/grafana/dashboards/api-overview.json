@@ -1,0 +1,128 @@
+{
+  "title": "Forex Bot — API Overview (RED method)",
+  "uid": "api-overview",
+  "tags": ["forex-bot", "api", "RED"],
+  "timezone": "browser",
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Request rate (req/s)",
+      "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
+      "targets": [{"expr": "sum(rate(http_requests_total{service=\"backend\"}[5m]))"}]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Error rate (5xx ratio)",
+      "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
+      "targets": [{"expr": "sli:api_error_ratio:5m"}],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 0.005},
+            {"color": "red", "value": 0.01}
+          ]}
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Latency p95 (s)",
+      "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4},
+      "targets": [{"expr": "sli:api_latency:p95_5m"}],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 0.3},
+            {"color": "red", "value": 0.5}
+          ]}
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Signal→Order p95 (s)",
+      "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4},
+      "targets": [{"expr": "sli:signal_to_order:p95_5m"}],
+      "fieldConfig": {
+        "defaults": {"unit": "s"}
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Requests / status",
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+      "targets": [{
+        "expr": "sum by (status) (rate(http_requests_total{service=\"backend\"}[1m]))",
+        "legendFormat": "{{status}}"
+      }]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Latency p50 / p95 / p99",
+      "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket{service=\"backend\"}[5m])))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{service=\"backend\"}[5m])))", "legendFormat": "p95"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{service=\"backend\"}[5m])))", "legendFormat": "p99"}
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Open positions",
+      "gridPos": {"x": 0, "y": 12, "w": 8, "h": 6},
+      "targets": [{"expr": "sum(open_positions_total)"}]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Signals / min",
+      "gridPos": {"x": 8, "y": 12, "w": 8, "h": 6},
+      "targets": [{"expr": "sum by (strategy) (rate(signals_generated_total[1m]) * 60)", "legendFormat": "{{strategy}}"}]
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "MT5 heartbeat (s ago)",
+      "gridPos": {"x": 16, "y": 12, "w": 8, "h": 6},
+      "targets": [{"expr": "time() - mt5_supervisor_last_heartbeat_timestamp_seconds"}],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 30},
+            {"color": "red", "value": 60}
+          ]}
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Queue depth",
+      "gridPos": {"x": 0, "y": 18, "w": 12, "h": 6},
+      "targets": [{"expr": "redis_list_length{key=~\"queue:.*\"}", "legendFormat": "{{key}}"}]
+    },
+    {
+      "id": 11,
+      "type": "logs",
+      "title": "Recent backend errors",
+      "gridPos": {"x": 12, "y": 18, "w": 12, "h": 6},
+      "datasource": {"type": "loki", "uid": "loki"},
+      "targets": [{"expr": "{service=\"backend\", level=\"ERROR\"}"}]
+    }
+  ]
+}

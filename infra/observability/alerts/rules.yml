@@ -1,0 +1,402 @@
+# ============================================================================
+# infra/observability/alerts/rules.yml — Prometheus alert rules
+# ============================================================================
+# Owner: Hestia Kaoru
+# Last updated: 2026-06-15
+#
+# Every alert MUST have:
+#   - severity label (critical|warning|info)
+#   - runbook_url label pointing to a real runbook
+#   - summary annotation (one-line, includes ${labels.X} interpolation)
+#   - description annotation (what to do, where to look)
+# If you can't write a runbook, the alert is noise — delete it.
+# ============================================================================
+
+groups:
+
+  # ==========================================================================
+  # Backend API
+  # ==========================================================================
+  - name: backend
+    interval: 30s
+    rules:
+
+      - alert: BackendHighLatencyP95
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, route) (
+              rate(http_request_duration_seconds_bucket{job="backend"}[5m])
+            )
+          ) > 1.0
+        for: 5m
+        labels:
+          severity: warning
+          service: backend
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/deployment/runbooks/backend-latency.md
+        annotations:
+          summary: "Backend p95 latency {{ $value | humanizeDuration }} (route={{ $labels.route }})"
+          description: |
+            Backend route {{ $labels.route }} p95 > 1s for 5 minutes.
+            Check: slow DB queries (pg_stat_statements), Redis latency, GC pauses.
+            Mitigate: scale backend replicas or rate-limit at edge.
+
+      - alert: BackendHighErrorRate
+        expr: |
+          (sum by (job) (rate(http_requests_total{job="backend",status=~"5.."}[5m])))
+          /
+          (sum by (job) (rate(http_requests_total{job="backend"}[5m])))
+          > 0.01
+        for: 5m
+        labels:
+          severity: critical
+          service: backend
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/deployment/runbooks/backend-errors.md
+        annotations:
+          summary: "Backend 5xx rate {{ $value | humanizePercentage }} over 1%"
+          description: |
+            >1% of backend responses are 5xx for 5 minutes.
+            Check: logs (Loki query {job="backend"} |~ "ERROR"), upstream dependencies.
+            Mitigate: rollback if recent deploy; otherwise see runbook.
+
+      - alert: BackendDown
+        expr: up{job="backend"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: backend
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/deployment/runbooks/backend-down.md
+        annotations:
+          summary: "Backend instance {{ $labels.instance }} down"
+          description: |
+            Prometheus cannot scrape backend for 2 minutes.
+            Check: docker ps, docker logs forex-bot-backend-1.
+
+      - alert: BackendHighSaturation
+        expr: |
+          rate(process_cpu_seconds_total{job="backend"}[5m]) > 0.85
+        for: 10m
+        labels:
+          severity: warning
+          service: backend
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/deployment/runbooks/backend-saturation.md
+        annotations:
+          summary: "Backend instance {{ $labels.instance }} CPU saturated"
+          description: |
+            CPU > 85% for 10m. Consider scaling replicas or moving to larger VPS.
+
+  # ==========================================================================
+  # Postgres
+  # ==========================================================================
+  - name: postgres
+    interval: 30s
+    rules:
+
+      - alert: PostgresConnectionsHigh
+        expr: |
+          (sum(pg_stat_activity_count) by (instance))
+          /
+          (sum(pg_settings_max_connections) by (instance))
+          > 0.80
+        for: 5m
+        labels:
+          severity: warning
+          service: postgres
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/deployment/runbooks/db-failover.md
+        annotations:
+          summary: "Postgres connections {{ $value | humanizePercentage }} of max"
+          description: |
+            Postgres has used >80% of max_connections.
+            Check: SELECT pid, query, state FROM pg_stat_activity WHERE state != 'idle';
+            Mitigate: kill idle-in-transaction sessions, raise max_connections, deploy PgBouncer.
+
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: postgres
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/deployment/runbooks/db-failover.md
+        annotations:
+          summary: "Postgres down on {{ $labels.instance }}"
+          description: |
+            Postgres exporter cannot reach the database. App is hard-down.
+
+      - alert: PostgresReplicationLag
+        expr: pg_replication_lag_seconds > 30
+        for: 5m
+        labels:
+          severity: warning
+          service: postgres
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/deployment/runbooks/db-failover.md
+        annotations:
+          summary: "Postgres replica lag {{ $value }}s"
+          description: Replication lag > 30s — check network and replica IO.
+
+      - alert: PostgresLongRunningQuery
+        expr: pg_stat_activity_max_tx_duration{datname="forex_bot"} > 300
+        for: 5m
+        labels:
+          severity: warning
+          service: postgres
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/deployment/runbooks/db-failover.md
+        annotations:
+          summary: "Long-running transaction on Postgres ({{ $value }}s)"
+          description: |
+            A transaction has been open for >5 minutes. Find with:
+            SELECT pid, now() - xact_start AS age, query FROM pg_stat_activity
+              WHERE xact_start IS NOT NULL ORDER BY age DESC LIMIT 5;
+
+  # ==========================================================================
+  # Redis
+  # ==========================================================================
+  - name: redis
+    interval: 30s
+    rules:
+
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: redis
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/deployment/runbooks/redis-down.md
+        annotations:
+          summary: "Redis down"
+          description: Auth, sessions, RQ queue all broken. App degraded.
+
+      - alert: RedisMemoryHigh
+        expr: |
+          (redis_memory_used_bytes / redis_memory_max_bytes) > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          service: redis
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/deployment/runbooks/redis-down.md
+        annotations:
+          summary: "Redis memory {{ $value | humanizePercentage }}"
+          description: |
+            Redis hitting maxmemory; allkeys-lru will start evicting.
+
+  # ==========================================================================
+  # Host (node-exporter)
+  # ==========================================================================
+  - name: host
+    interval: 30s
+    rules:
+
+      - alert: DiskFreeLow
+        expr: |
+          (node_filesystem_avail_bytes{mountpoint!~"/(snap|boot).*"}
+            / node_filesystem_size_bytes{mountpoint!~"/(snap|boot).*"}) < 0.20
+        for: 10m
+        labels:
+          severity: critical
+          service: host
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/deployment/runbooks/disk-pressure.md
+        annotations:
+          summary: "Disk free {{ $value | humanizePercentage }} on {{ $labels.mountpoint }}"
+          description: |
+            <20% free on {{ $labels.host }}:{{ $labels.mountpoint }}.
+            Check: docker system df, Loki retention, Prometheus retention.
+
+      - alert: DiskFillingFast
+        expr: |
+          predict_linear(node_filesystem_avail_bytes{mountpoint="/"}[6h], 24*3600) < 0
+        for: 30m
+        labels:
+          severity: warning
+          service: host
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/deployment/runbooks/disk-pressure.md
+        annotations:
+          summary: "Disk will fill in <24h at current rate"
+          description: |
+            Linear prediction shows root fs at 0 within 24 hours.
+
+      - alert: HostCpuHigh
+        expr: |
+          (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) > 0.85
+        for: 15m
+        labels:
+          severity: warning
+          service: host
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/deployment/runbooks/host-saturation.md
+        annotations:
+          summary: "Host {{ $labels.instance }} CPU {{ $value | humanizePercentage }}"
+          description: CPU > 85% for 15 min. Consider sizing up.
+
+      - alert: HostMemoryHigh
+        expr: |
+          (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.90
+        for: 10m
+        labels:
+          severity: warning
+          service: host
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/deployment/runbooks/host-saturation.md
+        annotations:
+          summary: "Host memory {{ $value | humanizePercentage }}"
+          description: Memory pressure — OOM killer likely soon.
+
+  # ==========================================================================
+  # MT5 bridge
+  # ==========================================================================
+  - name: mt5-bridge
+    interval: 30s
+    rules:
+
+      - alert: Mt5BridgeUnreachable
+        expr: up{job="mt5-bridge"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          service: mt5-bridge
+          page: "true"
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/deployment/runbooks/mt5-disconnect.md
+        annotations:
+          summary: "MT5 bridge unreachable — all live trading halted"
+          description: |
+            Prometheus cannot reach the MT5 bridge for 5 minutes. All live
+            engines have no order path. Check Windows VPS, cloudflared tunnel
+            status, MT5 terminal pool.
+
+      - alert: Mt5TerminalDisconnected
+        expr: mt5_terminal_connected == 0
+        for: 3m
+        labels:
+          severity: critical
+          service: mt5-bridge
+          page: "true"
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/deployment/runbooks/mt5-disconnect.md
+        annotations:
+          summary: "MT5 terminal {{ $labels.terminal_id }} disconnected from broker"
+          description: |
+            Terminal {{ $labels.terminal_id }} (user={{ $labels.user_id }}) lost
+            broker connection. Live engine will be paused by supervisor.
+
+  # ==========================================================================
+  # Live engines (trading)
+  # ==========================================================================
+  - name: trading
+    interval: 30s
+    rules:
+
+      - alert: LiveEngineHeartbeatMissing
+        expr: |
+          time() - live_engine_last_heartbeat_timestamp_seconds > 120
+        for: 2m
+        labels:
+          severity: critical
+          service: trading-engine
+          page: "true"
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/deployment/runbooks/live-engine-stuck.md
+        annotations:
+          summary: "Live engine {{ $labels.engine_id }} heartbeat missing"
+          description: |
+            Engine has not pinged for >2 minutes. Open positions are unmanaged.
+            Check supervisor logs, kill-switch state, MT5 bridge.
+
+      - alert: DailyLossApproachingLimit
+        expr: |
+          (abs(daily_loss_usd{user_id!=""}) / daily_loss_limit_usd) > 0.80
+        for: 2m
+        labels:
+          severity: warning
+          service: trading-engine
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/security/kill-switch.md
+        annotations:
+          summary: "User {{ $labels.user_id }} at {{ $value | humanizePercentage }} of daily loss limit"
+          description: |
+            Kill switch will engage at 100%. Notify user / monitor closely.
+
+      - alert: KillSwitchTriggered
+        expr: increase(kill_switch_triggered_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: info
+          service: trading-engine
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/security/kill-switch.md
+        annotations:
+          summary: "Kill switch triggered (scope={{ $labels.scope }} reason={{ $labels.reason }})"
+          description: |
+            Kill switch engaged. This is informational — audit trail only.
+
+      - alert: SignalRateAnomaly
+        expr: |
+          rate(signals_generated_total[10m]) > 10 * avg_over_time(rate(signals_generated_total[1h])[1d:5m])
+        for: 5m
+        labels:
+          severity: warning
+          service: trading-engine
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/deployment/runbooks/signal-anomaly.md
+        annotations:
+          summary: "Signal rate 10x baseline"
+          description: |
+            Possible runaway signal — check strategy parameters / market regime change.
+
+  # ==========================================================================
+  # Backup / DR
+  # ==========================================================================
+  - name: backup
+    interval: 60s
+    rules:
+
+      - alert: BackupMissing
+        expr: |
+          absent_over_time(forex_bot_backup_last_success_timestamp_seconds[26h])
+          or
+          (time() - forex_bot_backup_last_success_timestamp_seconds > 26*3600)
+        for: 0m
+        labels:
+          severity: critical
+          service: backup
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/infra/backup/README.md
+        annotations:
+          summary: "No successful backup in 26h"
+          description: |
+            Backup cron has not completed in 26 hours. Check
+            /var/log/forex-bot/backup.log and the cron service.
+
+      - alert: BackupVerifyMissing
+        expr: |
+          (time() - forex_bot_backup_verify_last_success_timestamp_seconds > 14*24*3600)
+        for: 0m
+        labels:
+          severity: warning
+          service: backup
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/infra/backup/README.md
+        annotations:
+          summary: "Backup verify drill has not run in 14 days"
+          description: |
+            Weekly verify.sh has not succeeded. Backups may be silently corrupt.
+
+  # ==========================================================================
+  # Edge / Caddy
+  # ==========================================================================
+  - name: edge
+    interval: 30s
+    rules:
+
+      - alert: CaddyDown
+        expr: up{job="caddy"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: caddy
+          page: "true"
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/deployment/runbooks/caddy-down.md
+        annotations:
+          summary: "Caddy reverse proxy down"
+          description: All public endpoints unreachable.
+
+      - alert: ExternalHealthCheckFailing
+        expr: probe_success{job="blackbox-http"} == 0
+        for: 3m
+        labels:
+          severity: critical
+          service: edge
+          page: "true"
+          runbook_url: https://github.com/whyman404/forex-bot/blob/main/docs/deployment/runbook.md
+        annotations:
+          summary: "External health check failing: {{ $labels.instance }}"
+          description: |
+            Blackbox probe from outside cannot reach {{ $labels.instance }}.
+            Could be: Caddy, Cloudflare, DNS, or network.

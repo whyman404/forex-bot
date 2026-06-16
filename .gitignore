@@ -1,0 +1,134 @@
+# =============================================================================
+# .gitignore — Forex Bot Platform (root)
+# =============================================================================
+# Per-language ignores live in each subproject's own .gitignore. This file
+# covers root-level and cross-cutting concerns.
+# =============================================================================
+
+# ------- Secrets (NEVER commit) -------
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+secrets/
+**/credentials.json
+**/service-account*.json
+
+# ------- OS junk -------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+*~
+.*.swp
+.*.swo
+
+# ------- Editor / IDE -------
+.vscode/
+!.vscode/settings.json.sample
+!.vscode/extensions.json
+.idea/
+*.iml
+*.ipr
+*.iws
+.history/
+.cursor/
+.windsurf/
+*.code-workspace
+
+# ------- Python -------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pytype/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.benchmarks/
+.python-version
+pip-log.txt
+pip-delete-this-directory.txt
+# uv / poetry
+.venv/
+venv/
+env/
+ENV/
+.uv-cache/
+
+# ------- Node / Next.js -------
+node_modules/
+.pnpm-store/
+.npm/
+.yarn/
+.next/
+out/
+.nuxt/
+.cache/
+.parcel-cache/
+.vercel
+.turbo
+.swc/
+*.tsbuildinfo
+next-env.d.ts.bak
+
+# ------- Build artifacts -------
+*.log
+logs/
+*.pid
+*.seed
+*.pid.lock
+coverage/
+test-results/
+playwright-report/
+.playwright/
+
+# ------- Docker -------
+.dockerignore.local
+
+# ------- Misc -------
+*.tmp
+*.bak
+*.old
+.scratch/
+scratch/
+local/
+
+# ------- Project specific -------
+# backtest data caches (often huge)
+trading-engine/data/cache/
+trading-engine/data/downloads/
+# generated alembic migration scratch
+backend/migrations/versions/__pycache__/
+# uploaded user files in dev
+backend/uploads/
+
+# ------- Allow specific patterns even if matched above -------
+!.gitkeep

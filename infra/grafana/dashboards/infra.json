@@ -1,0 +1,151 @@
+{
+  "annotations": {"list": []},
+  "description": "Forex Bot — Infrastructure (USE: host + DB + Redis). Owner: Hestia.",
+  "editable": true,
+  "id": null,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "fieldConfig": {"defaults": {"unit": "percentunit"}},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "targets": [
+        {
+          "expr": "1 - avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m]))",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Host CPU",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "fieldConfig": {"defaults": {"unit": "percentunit"}},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "targets": [
+        {
+          "expr": "1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Host memory",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "fieldConfig": {"defaults": {"unit": "percentunit"}},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "id": 3,
+      "targets": [
+        {
+          "expr": "1 - (node_filesystem_avail_bytes{mountpoint=\"/\"} / node_filesystem_size_bytes{mountpoint=\"/\"})",
+          "legendFormat": "/ on {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "1 - (node_filesystem_avail_bytes{mountpoint=\"/srv\"} / node_filesystem_size_bytes{mountpoint=\"/srv\"})",
+          "legendFormat": "/srv on {{instance}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Disk usage",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "fieldConfig": {"defaults": {"unit": "Bps"}},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "id": 4,
+      "targets": [
+        {"expr": "rate(node_network_receive_bytes_total{device!~\"lo|veth.*|br-.*|docker.*\"}[5m])", "legendFormat": "{{instance}}/{{device}} rx", "refId": "A"},
+        {"expr": "rate(node_network_transmit_bytes_total{device!~\"lo|veth.*|br-.*|docker.*\"}[5m])", "legendFormat": "{{instance}}/{{device}} tx", "refId": "B"}
+      ],
+      "title": "Network throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "fieldConfig": {"defaults": {"unit": "short"}},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "id": 10,
+      "targets": [
+        {"expr": "sum by (state) (pg_stat_activity_count)", "legendFormat": "{{state}}", "refId": "A"},
+        {"expr": "pg_settings_max_connections", "legendFormat": "max", "refId": "B"}
+      ],
+      "title": "Postgres connections",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "fieldConfig": {"defaults": {"unit": "ops"}},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "id": 11,
+      "targets": [
+        {"expr": "rate(pg_stat_database_xact_commit{datname=\"forex_bot\"}[5m])", "legendFormat": "commits/s", "refId": "A"},
+        {"expr": "rate(pg_stat_database_xact_rollback{datname=\"forex_bot\"}[5m])", "legendFormat": "rollbacks/s", "refId": "B"}
+      ],
+      "title": "Postgres transactions",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "fieldConfig": {"defaults": {"unit": "ops"}},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "id": 12,
+      "targets": [
+        {"expr": "rate(redis_commands_processed_total[1m])", "legendFormat": "cmds/s", "refId": "A"}
+      ],
+      "title": "Redis ops/s",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "fieldConfig": {"defaults": {"unit": "bytes"}},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "id": 13,
+      "targets": [
+        {"expr": "redis_memory_used_bytes", "legendFormat": "used", "refId": "A"},
+        {"expr": "redis_memory_max_bytes", "legendFormat": "max", "refId": "B"}
+      ],
+      "title": "Redis memory",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "fieldConfig": {"defaults": {"unit": "percentunit"}},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 32},
+      "id": 14,
+      "targets": [
+        {
+          "expr": "sum by (name) (rate(container_cpu_usage_seconds_total{name=~\"forex-bot-.*\"}[1m]))",
+          "legendFormat": "{{name}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Container CPU (cAdvisor)",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["forex-bot", "infra"],
+  "templating": {
+    "list": [
+      {
+        "current": {"selected": false, "text": "Prometheus", "value": "Prometheus"},
+        "hide": 0,
+        "name": "DS_PROM",
+        "query": "prometheus",
+        "refresh": 1,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": {"from": "now-6h", "to": "now"},
+  "title": "Forex Bot — Infrastructure",
+  "uid": "forex-bot-infra",
+  "version": 1
+}

@@ -1,0 +1,334 @@
+# ============================================================================
+# infra/docker-compose.yml — Forex Bot Platform (dev-friendly, one-command-up)
+# ============================================================================
+# Owner: Hestia Kaoru (DevOps / SRE)
+# Last updated: 2026-06-15
+#
+# Goal: `make up` or `./scripts/dev.sh` → ทุก service start + healthy + เปิดเว็บใช้ได้
+#
+# Linux-only services. The MT5 adapter ตามจริงรันบน Windows VPS ใน prod
+# (ดู docs/deployment/deployment-architecture.md). dev profile ใช้ mt5-bridge-stub
+# ที่ return canned response เพื่อให้ frontend/backend ทดสอบ flow ได้
+# โดยไม่ต้องมี Windows machine.
+#
+# Run from project root: `docker compose -f infra/docker-compose.yml ...`
+# Or via Makefile / dev.sh which wraps the command.
+# ============================================================================
+
+name: forex-bot
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-healthcheck-defaults: &healthcheck-defaults
+  interval: 15s
+  timeout: 5s
+  retries: 5
+  start_period: 30s
+
+networks:
+  edge:
+    name: forex-bot-edge
+    driver: bridge
+  internal:
+    name: forex-bot-internal
+    driver: bridge
+
+volumes:
+  postgres-data:
+    name: forex-bot-postgres-data
+  redis-data:
+    name: forex-bot-redis-data
+  prometheus-data:
+    name: forex-bot-prometheus-data
+  grafana-data:
+    name: forex-bot-grafana-data
+
+services:
+  # ==========================================================================
+  # postgres — primary OLTP store.
+  # ==========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: forex-bot-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-forexbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-forexbot}
+      POSTGRES_DB: ${POSTGRES_DB:-forexbot}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-forexbot} -d ${POSTGRES_DB:-forexbot}"]
+    networks:
+      - internal
+    logging: *default-logging
+    labels:
+      service: postgres
+
+  # ==========================================================================
+  # redis — cache, session, queue (RQ for backtest jobs).
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: forex-bot-redis
+    restart: unless-stopped
+    command:
+      - "redis-server"
+      - "--appendonly"
+      - "yes"
+      - "--appendfsync"
+      - "everysec"
+      - "--maxmemory"
+      - "512mb"
+      - "--maxmemory-policy"
+      - "allkeys-lru"
+    volumes:
+      - redis-data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "redis-cli", "ping"]
+    networks:
+      - internal
+    logging: *default-logging
+    labels:
+      service: redis
+
+  # ==========================================================================
+  # backend — FastAPI app.
+  # ==========================================================================
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: runtime
+    image: forex-bot/backend:${IMAGE_TAG:-local}
+    container_name: forex-bot-backend
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-forexbot}:${POSTGRES_PASSWORD:-forexbot}@postgres:5432/${POSTGRES_DB:-forexbot}
+      REDIS_URL: redis://redis:6379/0
+      MT5_BRIDGE_URL: http://mt5-bridge-stub:8500
+      CORS_ORIGINS: "http://localhost:3000"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck-defaults
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).status==200 else sys.exit(1)"
+    networks:
+      - edge
+      - internal
+    logging: *default-logging
+    labels:
+      service: backend
+
+  # ==========================================================================
+  # frontend — Next.js 15.
+  # ==========================================================================
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    image: forex-bot/frontend:${IMAGE_TAG:-local}
+    container_name: forex-bot-frontend
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-change-me-dev}
+      HOSTNAME: "0.0.0.0"
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000"]
+    networks:
+      - edge
+      - internal
+    logging: *default-logging
+    labels:
+      service: frontend
+
+  # ==========================================================================
+  # trading-engine-worker — RQ/APScheduler worker for backtests + signal gen.
+  # paper-only in dev (no real broker connection).
+  # ==========================================================================
+  trading-engine-worker:
+    build:
+      context: ../trading-engine
+      dockerfile: Dockerfile
+    image: forex-bot/trading-engine:${IMAGE_TAG:-local}
+    container_name: forex-bot-trading-engine-worker
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-forexbot}:${POSTGRES_PASSWORD:-forexbot}@postgres:5432/${POSTGRES_DB:-forexbot}
+      REDIS_URL: redis://redis:6379/0
+      BACKEND_URL: http://backend:8000
+      MT5_BRIDGE_URL: http://mt5-bridge-stub:8500
+      ENGINE_MODE: ${ENGINE_MODE:-paper}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      mt5-bridge-stub:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+    networks:
+      - internal
+    logging: *default-logging
+    labels:
+      service: trading-engine-worker
+
+  # ==========================================================================
+  # email-worker — drains Redis `email_queue` and dispatches transactional mail.
+  # In dev with EMAIL_PROVIDER=console the worker simply logs the rendered email
+  # so signup/password-reset flows can be exercised without a real SMTP server.
+  # ==========================================================================
+  email-worker:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: runtime
+    image: forex-bot/backend:${IMAGE_TAG:-local}
+    container_name: forex-bot-email-worker
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-forexbot}:${POSTGRES_PASSWORD:-forexbot}@postgres:5432/${POSTGRES_DB:-forexbot}
+      REDIS_URL: redis://redis:6379/0
+    command: ["python", "-m", "app.workers.email_worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+    networks:
+      - internal
+    logging: *default-logging
+    labels:
+      service: email-worker
+
+  # ==========================================================================
+  # mt5-bridge-stub — placeholder that mimics MT5 bridge HTTP API.
+  # In production, swap with real bridge running on Windows VPS via WireGuard.
+  # See docs/deployment/deployment-architecture.md → "MT5 Bridge swap procedure"
+  # ==========================================================================
+  mt5-bridge-stub:
+    build:
+      context: ./docker/mt5-bridge-stub
+      dockerfile: Dockerfile
+    image: forex-bot/mt5-bridge-stub:${IMAGE_TAG:-local}
+    container_name: forex-bot-mt5-bridge-stub
+    restart: unless-stopped
+    environment:
+      BRIDGE_PORT: "8500"
+      STUB_MODE: "canned" # canned | random
+    ports:
+      - "127.0.0.1:8500:8500"
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8500/healthz"]
+    networks:
+      - internal
+    logging: *default-logging
+    labels:
+      service: mt5-bridge-stub
+      env: stub
+
+  # ==========================================================================
+  # prometheus — metrics scraping (dev only — light retention).
+  # ==========================================================================
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: forex-bot-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:9090/-/healthy"]
+    networks:
+      - internal
+    logging: *default-logging
+    labels:
+      service: prometheus
+
+  # ==========================================================================
+  # grafana — dashboards.
+  # ==========================================================================
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: forex-bot-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin-dev}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana-dashboard.json:/var/lib/grafana/dashboards/forex-bot.json:ro
+    ports:
+      - "127.0.0.1:3001:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/health"]
+    networks:
+      - internal
+    logging: *default-logging
+    labels:
+      service: grafana

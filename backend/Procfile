@@ -1,0 +1,18 @@
+# --------------------------------------------------------------------------
+# Procfile — Backend services on Railway (Nixpacks honors this).
+# Atlas Goro — one process type per worker. Create one Railway service per
+# line in the dashboard, OR pin via the start-command field per service.
+#
+# Notes:
+# - `--proxy-headers` + `--forwarded-allow-ips=*` is REQUIRED on Railway so
+#   our middleware sees the real client IP via X-Forwarded-For.
+# - $PORT is injected by Railway at runtime; we default to 8000 for local.
+# - Workers don't serve HTTP — Railway should NOT set a healthcheck path.
+# - `release` runs once per deploy *before* web starts (Heroku-style).
+#   Railway honors this via the post-deploy script; the alembic line is a
+#   safe no-op when migrations are current.
+# --------------------------------------------------------------------------
+web: uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*'
+email_worker: python -m app.workers.email_worker
+backtest_worker: rq worker backtest default --url ${REDIS_URL}
+release: bash scripts/railway_post_deploy.sh

@@ -1,0 +1,164 @@
+# ============================================================================
+# infra/observability/alertmanager.yml — Alert routing
+# ============================================================================
+# Owner: Hestia Kaoru
+# Last updated: 2026-06-15
+#
+# Routing strategy:
+#   - severity=critical AND page=true → PagerDuty (if configured) + Slack + email
+#   - severity=critical              → Slack #alerts-critical + email
+#   - severity=warning               → Slack #alerts-warning
+#   - severity=info                  → Slack #alerts-audit (no notification noise)
+#
+# Env-var substitution requires alertmanager 0.26+ with --enable-feature=template-expansion
+# Use envsubst at compose-up time or substitute via secret mounts.
+# ============================================================================
+
+global:
+  resolve_timeout: 5m
+  smtp_from: "alerts@forexbot.example.com"
+  smtp_smarthost: "${SMTP_HOST}:587"
+  smtp_auth_username: "${SMTP_USER}"
+  smtp_auth_password: "${SMTP_PASSWORD}"
+  smtp_require_tls: true
+  slack_api_url: "${SLACK_WEBHOOK_URL}"
+
+templates:
+  - /etc/alertmanager/templates/*.tmpl
+
+# ----------------------------------------------------------------------------
+# Routes
+# ----------------------------------------------------------------------------
+route:
+  receiver: slack-warning            # default fallback
+  group_by: ["alertname", "service", "instance"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+  routes:
+    # Page-worthy: critical AND page=true (mt5 down, live engine stuck, etc.)
+    - matchers:
+        - severity = "critical"
+        - page = "true"
+      receiver: pager
+      group_wait: 10s
+      group_interval: 1m
+      repeat_interval: 30m
+      continue: true  # also send to Slack
+
+    # Critical (no page)
+    - matchers:
+        - severity = "critical"
+      receiver: slack-critical
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 1h
+      continue: true   # also email so it lands in inbox
+
+    - matchers:
+        - severity = "critical"
+      receiver: email-oncall
+
+    # Warning
+    - matchers:
+        - severity = "warning"
+      receiver: slack-warning
+
+    # Info — audit channel only, no notifications
+    - matchers:
+        - severity = "info"
+      receiver: slack-audit
+      repeat_interval: 24h
+
+# ----------------------------------------------------------------------------
+# Receivers
+# ----------------------------------------------------------------------------
+receivers:
+
+  # Stub — never used (fallback when matchers fail)
+  - name: blackhole
+
+  - name: pager
+    pagerduty_configs:
+      - routing_key: "${PAGERDUTY_ROUTING_KEY}"
+        severity: critical
+        details:
+          alertname: "{{ .GroupLabels.alertname }}"
+          service: "{{ .GroupLabels.service }}"
+          summary: "{{ .CommonAnnotations.summary }}"
+          description: "{{ .CommonAnnotations.description }}"
+          runbook: "{{ .CommonLabels.runbook_url }}"
+        send_resolved: true
+    # Also notify Slack regardless
+    slack_configs:
+      - channel: "#alerts-critical"
+        send_resolved: true
+        title: ":rotating_light: PAGE: {{ .CommonAnnotations.summary }}"
+        text: |
+          *Service:* {{ .CommonLabels.service }}
+          *Description:* {{ .CommonAnnotations.description }}
+          *Runbook:* {{ .CommonLabels.runbook_url }}
+
+  - name: slack-critical
+    slack_configs:
+      - channel: "#alerts-critical"
+        send_resolved: true
+        title: ":fire: CRITICAL: {{ .CommonAnnotations.summary }}"
+        text: |
+          *Service:* {{ .CommonLabels.service }}
+          *Description:* {{ .CommonAnnotations.description }}
+          *Runbook:* {{ .CommonLabels.runbook_url }}
+
+  - name: email-oncall
+    email_configs:
+      - to: "${ALERT_EMAIL_TO}"
+        send_resolved: true
+        headers:
+          Subject: "[forex-bot CRITICAL] {{ .CommonAnnotations.summary }}"
+        html: |
+          <h2>{{ .CommonAnnotations.summary }}</h2>
+          <p><strong>Service:</strong> {{ .CommonLabels.service }}</p>
+          <p>{{ .CommonAnnotations.description }}</p>
+          <p><a href="{{ .CommonLabels.runbook_url }}">Runbook</a></p>
+
+  - name: slack-warning
+    slack_configs:
+      - channel: "#alerts-warning"
+        send_resolved: true
+        title: ":warning: {{ .CommonAnnotations.summary }}"
+        text: |
+          *Service:* {{ .CommonLabels.service }}
+          *Description:* {{ .CommonAnnotations.description }}
+          *Runbook:* {{ .CommonLabels.runbook_url }}
+
+  - name: slack-audit
+    slack_configs:
+      - channel: "#alerts-audit"
+        send_resolved: false
+        title: ":memo: {{ .CommonAnnotations.summary }}"
+        text: |
+          *Service:* {{ .CommonLabels.service }}
+          *Description:* {{ .CommonAnnotations.description }}
+
+# ----------------------------------------------------------------------------
+# Inhibition (suppress noise when the bigger thing is firing)
+# ----------------------------------------------------------------------------
+inhibit_rules:
+  - source_matchers: [severity = "critical"]
+    target_matchers: [severity = "warning"]
+    equal: [service, instance]
+
+  # If postgres is down, inhibit postgres connection / replication alerts
+  - source_matchers:
+      - alertname = "PostgresDown"
+    target_matchers:
+      - alertname =~ "Postgres.*"
+    equal: [instance]
+
+  # If mt5-bridge unreachable, inhibit terminal alerts (cascading)
+  - source_matchers:
+      - alertname = "Mt5BridgeUnreachable"
+    target_matchers:
+      - alertname = "Mt5TerminalDisconnected"
+    equal: [service]

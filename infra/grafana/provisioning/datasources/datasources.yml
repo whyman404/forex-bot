@@ -1,0 +1,33 @@
+# ============================================================================
+# Grafana datasource provisioning
+# ============================================================================
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 15s
+      httpMethod: POST
+      manageAlerts: true
+      alertmanagerUid: alertmanager
+
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    jsonData:
+      maxLines: 1000
+      derivedFields:
+        - matcherRegex: 'request_id=(\w+)'
+          name: TraceID
+          url: '$${__value.raw}'
+
+  # Tempo placeholder — uncomment once we deploy traces.
+  # - name: Tempo
+  #   type: tempo
+  #   access: proxy
+  #   url: http://tempo:3200

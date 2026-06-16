@@ -1,0 +1,501 @@
+# ============================================================================
+# docker-compose.yml — Forex Bot Platform (Linux services, dev profile)
+# ============================================================================
+# Owner: Hestia Kaoru (DevOps / SRE)
+# Last updated: 2026-06-14
+#
+# Linux-only services. MT5 adapter runs on a separate Windows VPS — see
+# infra/scripts/setup-windows-vps.md and infra/scripts/mt5-supervisor.py.
+#
+# Usage:
+#   dev:   docker compose up -d
+#   prod:  docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Env vars come from `.env` in the same directory. Never commit `.env`.
+# ============================================================================
+
+name: forex-bot
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+    labels: "service,env"
+
+x-healthcheck-defaults: &healthcheck-defaults
+  interval: 15s
+  timeout: 5s
+  retries: 5
+  start_period: 30s
+
+networks:
+  edge:
+    name: forex-bot-edge
+    driver: bridge
+  internal:
+    name: forex-bot-internal
+    driver: bridge
+    internal: false # keep false until we add ingress proxy
+  observability:
+    name: forex-bot-obs
+    driver: bridge
+
+volumes:
+  postgres-data:
+    name: forex-bot-postgres-data
+  postgres-wal:
+    name: forex-bot-postgres-wal
+  redis-data:
+    name: forex-bot-redis-data
+  prometheus-data:
+    name: forex-bot-prometheus-data
+  grafana-data:
+    name: forex-bot-grafana-data
+  loki-data:
+    name: forex-bot-loki-data
+
+services:
+  # ==========================================================================
+  # postgres — primary OLTP store. WAL retained for PITR.
+  # ==========================================================================
+  postgres:
+    image: postgres:16.4-alpine
+    container_name: forex-bot-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-forex}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-forex}
+      POSTGRES_DB: ${POSTGRES_DB:-forex_bot}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+      # Required for pgbackrest / wal-g later; harmless now.
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "effective_cache_size=512MB"
+      - "-c"
+      - "work_mem=8MB"
+      - "-c"
+      - "wal_level=replica"
+      - "-c"
+      - "archive_mode=on"
+      - "-c"
+      - "archive_command=test ! -f /var/lib/postgresql/wal/%f && cp %p /var/lib/postgresql/wal/%f"
+      - "-c"
+      - "max_wal_senders=3"
+      - "-c"
+      - "log_min_duration_statement=500"
+      - "-c"
+      - "log_statement=ddl"
+      - "-c"
+      - "log_connections=on"
+      - "-c"
+      - "log_disconnections=on"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - postgres-wal:/var/lib/postgresql/wal
+    ports:
+      - "127.0.0.1:5432:5432" # bind to localhost only in dev
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-forex} -d ${POSTGRES_DB:-forex_bot}"]
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+    networks:
+      - internal
+    logging: *default-logging
+    labels:
+      service: postgres
+      env: ${APP_ENV:-development}
+
+  # ==========================================================================
+  # redis — cache, session, queue (BullMQ-style + rate limit).
+  # AOF for durability of session state. RDB snapshots for cold backups.
+  # ==========================================================================
+  redis:
+    image: redis:7.4-alpine
+    container_name: forex-bot-redis
+    restart: unless-stopped
+    command:
+      - "redis-server"
+      - "--appendonly"
+      - "yes"
+      - "--appendfsync"
+      - "everysec"
+      - "--save"
+      - "900 1"
+      - "--save"
+      - "300 10"
+      - "--maxmemory"
+      - "512mb"
+      - "--maxmemory-policy"
+      - "allkeys-lru"
+      - "--requirepass"
+      - "${REDIS_PASSWORD:-redis-dev}"
+    volumes:
+      - redis-data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis-dev}", "ping"]
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+    networks:
+      - internal
+    logging: *default-logging
+    labels:
+      service: redis
+      env: ${APP_ENV:-development}
+
+  # ==========================================================================
+  # backend — FastAPI app (Atlas's image).
+  # Hot reload in dev via bind mount + --reload override.
+  # ==========================================================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    image: forex-bot/backend:${IMAGE_TAG:-local}
+    container_name: forex-bot-backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-forex}:${POSTGRES_PASSWORD:-forex}@postgres:5432/${POSTGRES_DB:-forex_bot}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis-dev}@redis:6379/0
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
+      OTEL_SERVICE_NAME: forex-bot-backend
+      PROMETHEUS_MULTIPROC_DIR: /tmp/prom
+    volumes:
+      # Bind mount for hot reload — overridden in prod compose.
+      - ./backend/app:/app/app:ro
+      - ./backend/alembic.ini:/app/alembic.ini:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).status==200 else sys.exit(1)"]
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+    networks:
+      - edge
+      - internal
+      - observability
+    logging: *default-logging
+    labels:
+      service: backend
+      env: ${APP_ENV:-development}
+      metrics_port: "8000"
+      metrics_path: "/metrics"
+
+  # ==========================================================================
+  # trading-engine — Python signal generator + paper trading.
+  # Live MT5 adapter runs on Windows VPS via WSS — NOT here.
+  # ==========================================================================
+  trading-engine:
+    build:
+      context: ./trading-engine
+      dockerfile: ../infra/docker/trading-engine.Dockerfile
+    image: forex-bot/trading-engine:${IMAGE_TAG:-local}
+    container_name: forex-bot-trading-engine
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-forex}:${POSTGRES_PASSWORD:-forex}@postgres:5432/${POSTGRES_DB:-forex_bot}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis-dev}@redis:6379/0
+      BACKEND_URL: http://backend:8000
+      MODE: ${ENGINE_MODE:-paper} # paper | backtest | live-via-supervisor
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
+      OTEL_SERVICE_NAME: forex-bot-trading-engine
+    volumes:
+      - ./trading-engine:/app:ro
+      - ./trading-engine/data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "python", "-c", "import sys, urllib.request; sys.exit(0)"]
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1.5G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    networks:
+      - internal
+      - observability
+    logging: *default-logging
+    labels:
+      service: trading-engine
+      env: ${APP_ENV:-development}
+
+  # ==========================================================================
+  # frontend — Next.js (standalone build).
+  # Dev: pnpm dev. Prod: node server.js.
+  # ==========================================================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../infra/docker/frontend.Dockerfile
+      target: runtime
+    image: forex-bot/frontend:${IMAGE_TAG:-local}
+    container_name: forex-bot-frontend
+    restart: unless-stopped
+    env_file:
+      - ./frontend/.env
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-change-me}
+      HOSTNAME: "0.0.0.0"
+    volumes:
+      # Bind mount for hot reload — overridden in prod compose.
+      - ./frontend/src:/app/src:ro
+      - ./frontend/public:/app/public:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/health"]
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+    networks:
+      - edge
+      - internal
+    logging: *default-logging
+    labels:
+      service: frontend
+      env: ${APP_ENV:-development}
+
+  # ==========================================================================
+  # prometheus — metrics scraping.
+  # ==========================================================================
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: forex-bot-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--storage.tsdb.retention.size=8GB"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:9090/-/healthy"]
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+    networks:
+      - observability
+    logging: *default-logging
+    labels:
+      service: prometheus
+      env: ${APP_ENV:-development}
+
+  # ==========================================================================
+  # grafana — dashboards + alerts.
+  # ==========================================================================
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: forex-bot-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin-dev}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_INSTALL_PLUGINS: ""
+      GF_FEATURE_TOGGLES_ENABLE: "publicDashboards"
+      GF_SMTP_ENABLED: ${GRAFANA_SMTP_ENABLED:-false}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:3001:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/health"]
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    networks:
+      - observability
+    logging: *default-logging
+    labels:
+      service: grafana
+      env: ${APP_ENV:-development}
+
+  # ==========================================================================
+  # loki — log aggregator.
+  # ==========================================================================
+  loki:
+    image: grafana/loki:3.2.0
+    container_name: forex-bot-loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/loki-config.yaml"]
+    volumes:
+      - ./infra/loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "127.0.0.1:3100:3100"
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3100/ready"]
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+    networks:
+      - observability
+    logging: *default-logging
+    labels:
+      service: loki
+      env: ${APP_ENV:-development}
+
+  # ==========================================================================
+  # promtail — log shipper from Docker containers → Loki.
+  # ==========================================================================
+  promtail:
+    image: grafana/promtail:3.2.0
+    container_name: forex-bot-promtail
+    restart: unless-stopped
+    command: ["-config.file=/etc/promtail/promtail-config.yaml"]
+    volumes:
+      - ./infra/promtail/promtail-config.yaml:/etc/promtail/promtail-config.yaml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      loki:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    networks:
+      - observability
+    logging: *default-logging
+    labels:
+      service: promtail
+      env: ${APP_ENV:-development}
+
+  # ==========================================================================
+  # node-exporter — host metrics (cpu/mem/disk/net).
+  # ==========================================================================
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: forex-bot-node-exporter
+    restart: unless-stopped
+    command:
+      - "--path.rootfs=/host"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+    networks:
+      - observability
+    logging: *default-logging
+    labels:
+      service: node-exporter
+      env: ${APP_ENV:-development}
+
+  # ==========================================================================
+  # cadvisor — container metrics.
+  # ==========================================================================
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.51.0
+    container_name: forex-bot-cadvisor
+    restart: unless-stopped
+    privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    networks:
+      - observability
+    logging: *default-logging
+    labels:
+      service: cadvisor
+      env: ${APP_ENV:-development}

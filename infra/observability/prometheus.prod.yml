@@ -1,0 +1,120 @@
+# ============================================================================
+# infra/observability/prometheus.prod.yml — Production scrape config
+# ============================================================================
+# Owner: Hestia Kaoru
+# Last updated: 2026-06-15
+#
+# Mounted into prometheus container at /etc/prometheus/prometheus.yml in prod.
+# Dev keeps the lighter prometheus.yml.
+# Reload via: docker compose exec prometheus kill -HUP 1
+#         or: curl -X POST http://prometheus:9090/-/reload (with lifecycle on)
+# ============================================================================
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: forex-bot
+    env: production
+    region: eu-falkenstein
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+rule_files:
+  - /etc/prometheus/alerts/*.yml
+
+scrape_configs:
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: backend
+    metrics_path: /metrics
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["backend:8000"]
+        labels:
+          service: backend
+          tier: app
+
+  - job_name: frontend
+    metrics_path: /api/metrics
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["frontend:3000"]
+        labels:
+          service: frontend
+          tier: app
+
+  - job_name: trading-engine
+    metrics_path: /metrics
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["trading-engine:9000"]
+        labels:
+          service: trading-engine
+          tier: worker
+
+  - job_name: mt5-bridge
+    scheme: https
+    metrics_path: /metrics
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["mt5-bridge.internal.forexbot.example.com"]
+        labels:
+          service: mt5-bridge
+          tier: bridge
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/mt5-bridge-token
+
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+        labels:
+          service: postgres
+          tier: data
+
+  - job_name: redis
+    static_configs:
+      - targets: ["redis-exporter:9121"]
+        labels:
+          service: redis
+          tier: data
+
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
+        labels:
+          host: linux-vps
+          tier: host
+
+  - job_name: cadvisor
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["cadvisor:8080"]
+        labels:
+          tier: container
+
+  - job_name: caddy
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["caddy:2019"]
+        labels:
+          service: caddy
+          tier: edge
+
+  - job_name: alertmanager
+    static_configs:
+      - targets: ["alertmanager:9093"]
+
+  - job_name: loki
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["loki:3100"]

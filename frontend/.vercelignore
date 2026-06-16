@@ -1,0 +1,58 @@
+# --------------------------------------------------------------------------
+# .vercelignore — what NOT to upload to Vercel
+# Keep the deploy bundle small + fast.
+# --------------------------------------------------------------------------
+
+# Tests + test artifacts
+tests/
+__tests__/
+*.test.ts
+*.test.tsx
+*.spec.ts
+*.spec.tsx
+playwright-report/
+test-results/
+coverage/
+.nyc_output/
+
+# Build / cache
+.next/
+out/
+node_modules/
+.turbo/
+.swc/
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+
+# Local env
+.env
+.env.local
+.env.development
+.env.test
+.env.development.local
+.env.test.local
+.env.production.local
+# keep .env.example for documentation
+
+# Logs + tmp
+*.log
+.DS_Store
+.idea/
+.vscode/
+*.swp
+tmp/
+
+# Docker — Vercel doesn't need these
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# Storybook (if added later)
+storybook-static/
+
+# Misc
+.git/
+.gitignore
+.eslintcache
+.prettierignore
+README.md

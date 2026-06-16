@@ -1,0 +1,101 @@
+[project]
+name = "forex-bot-trading-engine"
+version = "0.1.0"
+description = "Trading engine for the Forex/Crypto SaaS bot — strategies, backtest, broker integration."
+authors = [
+    { name = "Kairos Toki", email = "quant@forex-bot.internal" },
+]
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    # Backtesting
+    "vectorbt>=0.27.0",
+    "backtrader>=1.9.78.123",
+
+    # Crypto exchange
+    "ccxt>=4.3.0",
+
+    # Data + analytics
+    "pandas>=2.2.0",
+    "numpy>=1.26.0,<2.0.0",
+    "scipy>=1.13.0",
+
+    # Indicators — TA-Lib is C-backed (faster) but harder to install.
+    # We use `ta` (pure-Python) as a fallback that always installs.
+    "ta>=0.11.0",
+
+    # Config / env / validation
+    "python-dotenv>=1.0.1",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.3.0",
+    "pyyaml>=6.0.1",
+
+    # Logging
+    "structlog>=24.1.0",
+
+    # HTTP / async
+    "httpx>=0.27.0",
+    "tenacity>=8.4.0",
+]
+
+[project.optional-dependencies]
+# MT5 only works on Windows — keep it isolated so Mac/Linux installs don't fail.
+mt5 = [
+    "MetaTrader5>=5.0.45; platform_system == 'Windows'",
+]
+
+# TA-Lib (C library). Install only if you have the system library installed.
+talib = [
+    "TA-Lib>=0.4.28",
+]
+
+# Development tooling
+dev = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.5.0",
+    "mypy>=1.10.0",
+    "ipython>=8.25.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.24.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "strategies",
+    "backtest",
+    "broker",
+    "risk",
+    "data",
+]
+
+[tool.uv]
+# uv-specific config. Run `uv sync` to install.
+dev-dependencies = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.5.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+ignore = ["E501"]  # let formatter handle line length
+
+[tool.mypy]
+python_version = "3.12"
+strict_optional = true
+warn_unused_ignores = true
+ignore_missing_imports = true  # vectorbt, backtrader stubs are partial

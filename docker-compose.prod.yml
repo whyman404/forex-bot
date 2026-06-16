@@ -1,0 +1,197 @@
+# ============================================================================
+# docker-compose.prod.yml — Production overrides
+# ============================================================================
+# Apply with:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Changes vs base:
+#   - No bind mounts (immutable image only)
+#   - Backend: 2 replicas, tighter resource limits, restart: always
+#   - Frontend: NODE_ENV=production, no source mounts
+#   - Postgres/Redis bound to internal network only (no host port)
+#   - Stricter healthcheck timing
+#   - JSON logs cap reduced (less disk) — Loki holds the searchable copy
+# ============================================================================
+
+name: forex-bot
+
+services:
+  postgres:
+    restart: always
+    ports: !reset []
+    environment:
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C --data-checksums"
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 4G
+        reservations:
+          cpus: "1.0"
+          memory: 1G
+
+  redis:
+    restart: always
+    ports: !reset []
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  backend:
+    restart: always
+    # Remove dev bind mounts — code is in the image.
+    volumes: !reset []
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      LOG_LEVEL: INFO
+      WORKERS: "4"
+    command:
+      - "gunicorn"
+      - "app.main:app"
+      - "--workers"
+      - "4"
+      - "--worker-class"
+      - "uvicorn.workers.UvicornWorker"
+      - "--bind"
+      - "0.0.0.0:8000"
+      - "--access-logfile"
+      - "-"
+      - "--error-logfile"
+      - "-"
+      - "--timeout"
+      - "60"
+      - "--graceful-timeout"
+      - "30"
+      - "--keep-alive"
+      - "5"
+      - "--max-requests"
+      - "10000"
+      - "--max-requests-jitter"
+      - "1000"
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 5
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 30s
+        order: start-first
+        failure_action: rollback
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    healthcheck:
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+
+  frontend:
+    restart: always
+    volumes: !reset []
+    environment:
+      NODE_ENV: production
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 5
+      update_config:
+        parallelism: 1
+        delay: 30s
+        order: start-first
+        failure_action: rollback
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  trading-engine:
+    restart: always
+    volumes:
+      - ./trading-engine/data:/app/data # keep data dir mount, drop source mount
+    environment:
+      MODE: live-via-supervisor
+      APP_ENV: production
+    deploy:
+      replicas: 1 # singleton — only one signal generator at a time
+      restart_policy:
+        condition: any
+        delay: 10s
+        max_attempts: 5
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "1.0"
+          memory: 1G
+
+  prometheus:
+    restart: always
+    ports: !reset []
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=90d"
+      - "--storage.tsdb.retention.size=24GB"
+      - "--web.enable-lifecycle"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+
+  grafana:
+    restart: always
+    ports: !reset []
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD} # require explicit env in prod
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL}
+      GF_SMTP_ENABLED: "true"
+      GF_SMTP_HOST: ${SMTP_HOST}
+      GF_SMTP_USER: ${SMTP_USER}
+      GF_SMTP_PASSWORD: ${SMTP_PASSWORD}
+      GF_SMTP_FROM_ADDRESS: alerts@forex-bot.app
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+
+  loki:
+    restart: always
+    ports: !reset []
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2G
+
+  promtail:
+    restart: always
+
+  node-exporter:
+    restart: always
+
+  cadvisor:
+    restart: always

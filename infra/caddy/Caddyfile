@@ -1,0 +1,245 @@
+# ============================================================================
+# Caddyfile — Forex Bot production reverse proxy
+# ============================================================================
+# Owner: Hestia Kaoru
+# Last updated: 2026-06-15
+#
+# Caddy provides:
+#   - Auto HTTPS via Let's Encrypt (HTTP-01 challenge by default)
+#   - HTTP/2 + HTTP/3 (QUIC) automatic
+#   - Real-IP from Cloudflare (cf-connecting-ip)
+#   - HSTS, CSP, security headers
+#   - Edge rate limiting (caddy-ratelimit module)
+#   - Access logging in JSON → /var/log/caddy/access.log (collected by Promtail)
+#
+# Domains (override via .env.prod):
+#   DOMAIN          = forexbot.example.com         → frontend
+#   API_DOMAIN      = api.forexbot.example.com     → backend
+#   GRAFANA_DOMAIN  = grafana.forexbot.example.com → grafana (admin only)
+#
+# Cloudflare in front of Caddy (Full Strict mode) → Caddy obtains its own
+# Let's Encrypt cert; CF re-encrypts. SSL/TLS termination happens here.
+# ============================================================================
+
+{
+	# Global options
+	email {$ACME_EMAIL:ops@forexbot.example.com}
+	admin 0.0.0.0:2019
+	servers {
+		trusted_proxies static \
+			173.245.48.0/20 \
+			103.21.244.0/22 \
+			103.22.200.0/22 \
+			103.31.4.0/22 \
+			141.101.64.0/18 \
+			108.162.192.0/18 \
+			190.93.240.0/20 \
+			188.114.96.0/20 \
+			197.234.240.0/22 \
+			198.41.128.0/17 \
+			162.158.0.0/15 \
+			104.16.0.0/13 \
+			104.24.0.0/14 \
+			172.64.0.0/13 \
+			131.0.72.0/22 \
+			2400:cb00::/32 \
+			2606:4700::/32 \
+			2803:f800::/32 \
+			2405:b500::/32 \
+			2405:8100::/32 \
+			2a06:98c0::/29 \
+			2c0f:f248::/32
+		client_ip_headers Cf-Connecting-Ip X-Forwarded-For
+	}
+	log default {
+		output file /var/log/caddy/access.log {
+			roll_size 100MiB
+			roll_keep 10
+			roll_keep_for 720h
+		}
+		format json
+		level INFO
+	}
+	# Rate limiter zones (require https://github.com/mholt/caddy-ratelimit module)
+	order rate_limit before basicauth
+}
+
+# ============================================================================
+# Snippets
+# ============================================================================
+
+(security_headers) {
+	header {
+		# HSTS — 2 years, includeSubDomains, preload-ready
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		# Defense in depth
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "accelerometer=(), camera=(), geolocation=(), microphone=(), payment=(self)"
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Resource-Policy "same-site"
+		# CSP — provided by Argus (security). Frontend ships nonces per response.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'nonce-{http.request.uuid}' https://js.stripe.com https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https://{$API_DOMAIN} https://api.stripe.com; frame-src https://js.stripe.com https://challenges.cloudflare.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'; upgrade-insecure-requests"
+		# Remove server fingerprinting
+		-Server
+		-X-Powered-By
+	}
+}
+
+(common_log) {
+	log {
+		output file /var/log/caddy/access.log
+		format json
+	}
+}
+
+(deny_dotfiles) {
+	@dotfiles path_regexp /\.(?!well-known)
+	respond @dotfiles 404
+}
+
+# ============================================================================
+# Frontend (Next.js)
+# ============================================================================
+{$DOMAIN:forexbot.example.com} {
+	import security_headers
+	import deny_dotfiles
+	import common_log
+
+	encode zstd gzip
+
+	# Edge rate limit: 600 req/min per IP for frontend (HTML + static)
+	rate_limit {
+		zone frontend {
+			key {client_ip}
+			events 600
+			window 1m
+		}
+	}
+
+	# Health check — does not hit upstream
+	respond /caddy-health 200 {
+		body "ok"
+		close
+	}
+
+	# Static caching — Next.js immutable assets
+	@static path /_next/static/* /favicon.ico /robots.txt /sitemap.xml
+	header @static Cache-Control "public, max-age=31536000, immutable"
+
+	reverse_proxy frontend:3000 {
+		health_uri /api/health
+		health_interval 10s
+		health_timeout 3s
+		health_status 200
+		transport http {
+			read_buffer 16384
+			keepalive 30s
+		}
+	}
+}
+
+# ============================================================================
+# Backend API
+# ============================================================================
+{$API_DOMAIN:api.forexbot.example.com} {
+	import security_headers
+	import deny_dotfiles
+	import common_log
+
+	encode zstd gzip
+
+	# Stripe webhook — bypass auth-related rate limits (Stripe retries
+	# aggressively on 5xx, so we must accept their delivery). Canonical path
+	# is /api/v1/billing/webhook; the bare /stripe/webhook alias is rewritten
+	# for ops convenience (you can configure either in the Stripe dashboard).
+	@stripe path /api/v1/billing/webhook /stripe/webhook /api/v1/stripe/webhook
+	handle @stripe {
+		# Rewrite legacy aliases to the canonical backend route.
+		@legacy path /stripe/webhook /api/v1/stripe/webhook
+		rewrite @legacy /api/v1/billing/webhook
+		reverse_proxy backend:8000 {
+			header_up Host {host}
+			header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
+			header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
+			header_up X-Forwarded-Proto https
+		}
+	}
+
+	# Auth endpoints — tight rate limit at edge (Cloudflare also limits, this
+	# is defense in depth)
+	@auth path /api/v1/auth/* /api/v1/login* /api/v1/signup*
+	handle @auth {
+		rate_limit {
+			zone auth {
+				key {client_ip}
+				events 20
+				window 1m
+			}
+		}
+		reverse_proxy backend:8000 {
+			header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
+			header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
+			header_up X-Forwarded-Proto https
+		}
+	}
+
+	# Health check — fast 200
+	@health path /healthz /readyz /metrics
+	handle @health {
+		# /metrics from external is denied — only Prometheus scrapes container directly
+		@metrics path /metrics
+		respond @metrics 404
+
+		reverse_proxy backend:8000
+	}
+
+	# All other API paths
+	rate_limit {
+		zone api {
+			key {client_ip}
+			events 300
+			window 1m
+		}
+	}
+
+	reverse_proxy backend:8000 {
+		header_up Host {host}
+		header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
+		header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
+		header_up X-Forwarded-Proto https
+		# Backend sets streaming + SSE for some endpoints — disable buffering
+		flush_interval -1
+		transport http {
+			read_buffer 16384
+			write_buffer 16384
+			read_timeout 60s
+			write_timeout 60s
+		}
+	}
+
+	# CORS preflight handled by backend; we set only mandatory edge headers.
+	header {
+		Access-Control-Max-Age "86400"
+	}
+}
+
+# ============================================================================
+# Grafana (admin only — Cloudflare Access in front for SSO)
+# ============================================================================
+grafana.{$DOMAIN:forexbot.example.com} {
+	import security_headers
+	import common_log
+
+	# IP allowlist — admin IPs only (override via env in deploy)
+	# Combine with Cloudflare Access policy for full zero-trust.
+	@blocked not remote_ip {$ADMIN_IP_ALLOWLIST:127.0.0.1/8}
+	respond @blocked 403
+
+	reverse_proxy grafana:3000
+}
+
+# ============================================================================
+# Apex redirect (apex → www if any) and HTTP→HTTPS handled by Caddy default
+# ============================================================================

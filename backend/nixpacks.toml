@@ -1,0 +1,33 @@
+# --------------------------------------------------------------------------
+# nixpacks.toml — Backend (FastAPI + workers)
+# Railway uses Nixpacks to build a container image deterministically.
+# Docs: https://nixpacks.com/docs/configuration/file
+# --------------------------------------------------------------------------
+
+providers = ["python"]
+
+[variables]
+PYTHON_VERSION = "3.12"
+NIXPACKS_PYTHON_VERSION = "3.12"
+PIP_NO_CACHE_DIR = "1"
+PYTHONUNBUFFERED = "1"
+PYTHONDONTWRITEBYTECODE = "1"
+
+[phases.setup]
+nixPkgs = ["python312", "gcc", "libffi", "openssl", "postgresql", "curl"]
+aptPkgs = ["build-essential", "libpq-dev"]
+
+[phases.install]
+cmds = [
+  "pip install --upgrade pip uv",
+  "uv pip install --system -e .",
+]
+
+[phases.build]
+cmds = [
+  "python -m compileall app",
+]
+
+[start]
+# Default web start command (overridden by Procfile entries per service).
+cmd = "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*'"

@@ -1,0 +1,126 @@
+# ============================================================================
+# infra/docker-compose.override.yml — DEV overrides
+# ============================================================================
+# Auto-loaded by `docker compose` when present in the same directory as
+# docker-compose.yml. Provides:
+#   - bind-mount source for backend + frontend hot reload
+#   - exposed DB ports for IDE / psql / redis-cli access
+#   - debug ports for Python (debugpy 5678) + Node (9229)
+#   - dev-only env values
+#
+# To disable in CI / prod build, pass --file flag without override:
+#   docker compose -f docker-compose.yml up -d
+# ============================================================================
+
+services:
+  postgres:
+    # Already binds 5432; nothing to add here for dev. Keep block for clarity.
+    ports:
+      - "5432:5432" # expose to host (not just 127.0.0.1) for IDE remote dev
+    environment:
+      # Lower memory ceiling in dev so containers don't fight laptop RAM
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+
+  redis:
+    ports:
+      - "6379:6379"
+    command:
+      - "redis-server"
+      - "--appendonly"
+      - "yes"
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: runtime
+    command:
+      - "uvicorn"
+      - "app.main:app"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--reload"
+      - "--reload-dir"
+      - "/app/app"
+      - "--log-level"
+      - "debug"
+    volumes:
+      # Hot reload: live-edit Python on host → uvicorn picks up changes
+      - ../backend/app:/app/app
+      - ../backend/alembic.ini:/app/alembic.ini
+      - ../backend/migrations:/app/migrations
+    environment:
+      APP_ENV: development
+      LOG_LEVEL: DEBUG
+      RELOAD: "1"
+      # debugpy attach port (set REMOTE_DEBUG=1 in .env to enable)
+      DEBUGPY_PORT: "5678"
+    ports:
+      - "8000:8000"
+      - "5678:5678" # debugpy
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      target: deps
+    command: ["pnpm", "dev"]
+    volumes:
+      # Hot reload Next.js
+      - ../frontend/src:/app/src
+      - ../frontend/public:/app/public
+      - ../frontend/next.config.ts:/app/next.config.ts
+      - ../frontend/tsconfig.json:/app/tsconfig.json
+      - ../frontend/tailwind.config.ts:/app/tailwind.config.ts
+      - ../frontend/postcss.config.mjs:/app/postcss.config.mjs
+      - /app/node_modules
+      - /app/.next
+    environment:
+      NODE_ENV: development
+      WATCHPACK_POLLING: "true" # mac/win bind-mount file events
+      CHOKIDAR_USEPOLLING: "true"
+    ports:
+      - "3000:3000"
+      - "9229:9229" # node inspector
+
+  trading-engine-worker:
+    build:
+      context: ../trading-engine
+      dockerfile: Dockerfile
+    # Use the entrypoint's "worker" mode → `rq worker backtest`.
+    # `python -m worker` would fail — there is no top-level worker module.
+    command: ["worker"]
+    volumes:
+      - ../trading-engine:/app
+      - /app/__pycache__
+    environment:
+      APP_ENV: development
+      LOG_LEVEL: DEBUG
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "5679:5678" # debugpy (different host port to avoid clash with backend)
+
+  mt5-bridge-stub:
+    build:
+      context: ./docker/mt5-bridge-stub
+      dockerfile: Dockerfile
+    volumes:
+      - ./docker/mt5-bridge-stub/server.py:/app/server.py
+    environment:
+      STUB_MODE: canned
+      LOG_LEVEL: DEBUG
+
+  prometheus:
+    # Dev-only: shorter retention is already in base file. Nothing extra here.
+    ports:
+      - "9090:9090"
+
+  grafana:
+    ports:
+      - "3001:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"

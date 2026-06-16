@@ -1,0 +1,1253 @@
+openapi: 3.1.0
+info:
+  title: Forex Bot API
+  version: 0.1.0
+  description: |
+    REST API for the Forex/Crypto trading bot SaaS.
+
+    **Owner:** Atlas Goro
+    **Contract:** This spec is the source of truth. FastAPI runtime spec at `/openapi.json`
+    MUST match — drift is enforced in CI.
+
+    **Auth:** Bearer JWT (access token, 15 min TTL). Use `/auth/refresh` to rotate.
+
+    **Errors:** All errors return the `ErrorResponse` shape. See `docs/api/error-contract.md`.
+  contact:
+    name: Backend (Atlas Goro)
+    email: whyman404@gmail.com
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://api.forexbot.app/api/v1
+    description: Production
+  - url: https://api.staging.forexbot.app/api/v1
+    description: Staging
+  - url: http://localhost:8000/api/v1
+    description: Local
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: auth
+    description: Signup, login, refresh, email verification, password reset, TOTP.
+  - name: users
+    description: Current user profile.
+  - name: broker
+    description: User-connected broker accounts (envelope-encrypted credentials).
+  - name: strategy
+    description: Catalog of pre-built strategies.
+  - name: strategy-instance
+    description: User deployments of strategies — paper/live transitions, kill switch.
+  - name: backtest
+    description: Historical simulation jobs.
+  - name: billing
+    description: Stripe Checkout, Customer Portal, webhook, plan catalog.
+  - name: live-consent
+    description: Regulatory acknowledgements before live trading.
+  - name: compliance
+    description: GDPR/PDPA — consent, data export, account deletion.
+  - name: notification
+    description: User-facing notifications.
+  - name: admin
+    description: Admin-role-gated operational endpoints.
+  - name: internal
+    description: Trading-engine → backend (HMAC-signed; excluded from public spec).
+
+paths:
+  /auth/signup:
+    post:
+      tags: [auth]
+      summary: Create new user
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SignupRequest' }
+            example:
+              email: trader@example.com
+              password: very-strong-passphrase-123
+              display_name: Trader McTrade
+      responses:
+        '201':
+          description: Account created, returns token pair
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Exchange credentials for tokens
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+            example:
+              email: trader@example.com
+              password: very-strong-passphrase-123
+              totp_code: '123456'
+      responses:
+        '200':
+          description: Token pair
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      summary: Rotate refresh token, mint fresh access
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+      responses:
+        '200':
+          description: New token pair
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Revoke refresh token
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LogoutRequest' }
+      responses:
+        '200':
+          description: Logged out
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/verify-email:
+    post:
+      tags: [auth]
+      summary: Confirm email with single-use token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/VerifyEmailRequest' }
+      responses:
+        '200':
+          description: Verified
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /auth/forgot-password:
+    post:
+      tags: [auth]
+      summary: Request password reset email (always 200 to prevent enumeration)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ForgotPasswordRequest' }
+      responses:
+        '200':
+          description: Email sent if user exists
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+
+  /auth/reset-password:
+    post:
+      tags: [auth]
+      summary: Reset password using single-use token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResetPasswordRequest' }
+      responses:
+        '200':
+          description: Reset done
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /auth/totp/enroll:
+    post:
+      tags: [auth]
+      summary: Begin TOTP enrollment — returns secret + provisioning URI
+      responses:
+        '200':
+          description: Pending — user must POST /auth/totp/verify to activate
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TotpEnrollResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/totp/verify:
+    post:
+      tags: [auth]
+      summary: Confirm TOTP enrollment with first valid code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TotpVerifyRequest' }
+      responses:
+        '200':
+          description: TOTP activated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /users/me:
+    get:
+      tags: [users]
+      summary: Current user profile
+      responses:
+        '200':
+          description: Profile
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserPublic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    patch:
+      tags: [users]
+      summary: Update profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserUpdateRequest' }
+      responses:
+        '200':
+          description: Updated profile
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserPublic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    delete:
+      tags: [users]
+      summary: Delete account (soft delete, GDPR purge scheduled)
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /broker-accounts:
+    post:
+      tags: [broker]
+      summary: Connect a new broker account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BrokerAccountCreateRequest' }
+            example:
+              broker: exness_mt5
+              label: Exness Live Main
+              account_type: live
+              credentials:
+                login: '12345678'
+                password: <secret>
+                server: Exness-MT5Real
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BrokerAccountPublic' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+    get:
+      tags: [broker]
+      summary: List connected broker accounts
+      responses:
+        '200':
+          description: List
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/BrokerAccountPublic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /broker-accounts/{accountId}:
+    parameters:
+      - { name: accountId, in: path, required: true, schema: { type: string, format: uuid } }
+    patch:
+      tags: [broker]
+      summary: Update broker account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BrokerAccountUpdateRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BrokerAccountPublic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [broker]
+      summary: Delete broker account
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /broker-accounts/{accountId}/test-connection:
+    parameters:
+      - { name: accountId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [broker]
+      summary: Probe broker connectivity using stored credentials
+      responses:
+        '200':
+          description: Result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BrokerConnectionTestResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+
+  /strategies:
+    get:
+      tags: [strategy]
+      summary: List strategy catalog
+      responses:
+        '200':
+          description: Catalog
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/StrategyPublic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /strategies/{code}:
+    parameters:
+      - { name: code, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [strategy]
+      summary: Get single strategy by code
+      responses:
+        '200':
+          description: Strategy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StrategyPublic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /strategy-instances:
+    post:
+      tags: [strategy-instance]
+      summary: Create a strategy instance (draft state)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StrategyInstanceCreateRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StrategyInstancePublic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '402': { $ref: '#/components/responses/PaymentRequired' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+    get:
+      tags: [strategy-instance]
+      summary: List strategy instances of current user
+      responses:
+        '200':
+          description: List
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/StrategyInstancePublic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /strategy-instances/{instanceId}:
+    parameters:
+      - { name: instanceId, in: path, required: true, schema: { type: string, format: uuid } }
+    patch:
+      tags: [strategy-instance]
+      summary: Update strategy instance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StrategyInstanceUpdateRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StrategyInstancePublic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /strategy-instances/{instanceId}/start:
+    parameters:
+      - { name: instanceId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [strategy-instance]
+      summary: Transition instance to `running`
+      responses:
+        '200':
+          description: Running
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StrategyInstancePublic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '402': { $ref: '#/components/responses/PaymentRequired' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /strategy-instances/{instanceId}/stop:
+    parameters:
+      - { name: instanceId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [strategy-instance]
+      summary: Graceful stop (allow open positions to close per plan)
+      responses:
+        '200':
+          description: Stopping
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StrategyInstancePublic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /strategy-instances/{instanceId}/kill:
+    parameters:
+      - { name: instanceId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [strategy-instance]
+      summary: Emergency stop — flat all positions immediately
+      responses:
+        '200':
+          description: Killed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StrategyInstancePublic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /backtests:
+    post:
+      tags: [backtest]
+      summary: Enqueue a backtest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BacktestCreateRequest' }
+            example:
+              strategy_code: london_breakout_xauusd
+              range_start: '2023-01-01'
+              range_end: '2024-12-31'
+              initial_balance: 10000.00
+              params: { risk_per_trade_pct: 1.0 }
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BacktestPublic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '402': { $ref: '#/components/responses/PaymentRequired' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    get:
+      tags: [backtest]
+      summary: List backtests for current user
+      responses:
+        '200':
+          description: List
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/BacktestPublic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /backtests/{backtestId}:
+    parameters:
+      - { name: backtestId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [backtest]
+      summary: Get single backtest result
+      responses:
+        '200':
+          description: Backtest
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BacktestPublic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /billing/checkout-session:
+    post:
+      tags: [billing]
+      summary: Create a Stripe Checkout session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CheckoutSessionRequest' }
+      responses:
+        '200':
+          description: Session URL
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CheckoutSessionResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /billing/customer-portal:
+    post:
+      tags: [billing]
+      summary: Generate Stripe Customer Portal URL
+      responses:
+        '200':
+          description: Portal URL
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustomerPortalResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /billing/webhook:
+    post:
+      tags: [billing]
+      summary: Stripe webhook receiver
+      security: []
+      parameters:
+        - name: Stripe-Signature
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, description: Raw Stripe event payload }
+      responses:
+        '200':
+          description: Processed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /billing/me:
+    get:
+      tags: [billing]
+      summary: Current subscription + recent invoices
+      responses:
+        '200':
+          description: Subscription + invoices
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BillingMePublic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /billing/plans:
+    get:
+      tags: [billing]
+      summary: Public plan catalog (trial / pro_monthly / pro_yearly / lifetime)
+      security: []
+      responses:
+        '200':
+          description: Plans
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlansResponse' }
+
+  /strategy-instances/{instanceId}/preflight:
+    parameters:
+      - { name: instanceId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [strategy-instance]
+      summary: Run live-trading gate checks without flipping state
+      responses:
+        '200':
+          description: Gate result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GateResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /strategy-instances/{instanceId}/go-live:
+    parameters:
+      - { name: instanceId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [strategy-instance]
+      summary: Flip instance to live (requires paid subscription + gate pass)
+      responses:
+        '200':
+          description: Now live
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StrategyInstancePublic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '402': { $ref: '#/components/responses/PaymentRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /strategy-instances/{instanceId}/revert-to-paper:
+    parameters:
+      - { name: instanceId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [strategy-instance]
+      summary: Graceful revert from live to paper (closes positions via OMS first)
+      responses:
+        '200':
+          description: Paper
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StrategyInstancePublic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /strategy-instances/{instanceId}/health:
+    parameters:
+      - { name: instanceId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [strategy-instance]
+      summary: Live health snapshot for an instance
+      responses:
+        '200':
+          description: Health
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StrategyInstanceHealth' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /strategy-instances/{instanceId}/signals:
+    parameters:
+      - { name: instanceId, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: limit, in: query, required: false, schema: { type: integer, default: 50, minimum: 1, maximum: 200 } }
+    get:
+      tags: [strategy-instance]
+      summary: Recent signals for an instance
+      responses:
+        '200':
+          description: Signals
+          content:
+            application/json:
+              schema: { type: array, items: { type: object } }
+
+  /strategy-instances/{instanceId}/trades:
+    parameters:
+      - { name: instanceId, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: limit, in: query, required: false, schema: { type: integer, default: 50, minimum: 1, maximum: 200 } }
+    get:
+      tags: [strategy-instance]
+      summary: Recent trades for an instance
+      responses:
+        '200':
+          description: Trades
+          content:
+            application/json:
+              schema: { type: array, items: { type: object } }
+
+  /live-consents:
+    post:
+      tags: [live-consent]
+      summary: Record signed agreement for live trading on a strategy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LiveConsentRequest' }
+      responses:
+        '201':
+          description: Consent recorded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LiveConsentPublic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    get:
+      tags: [live-consent]
+      summary: List live-trading consents signed by current user
+      responses:
+        '200':
+          description: List
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/LiveConsentPublic' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /users/me/consent:
+    post:
+      tags: [compliance]
+      summary: Record TOS / privacy / marketing consent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConsentRequest' }
+      responses:
+        '201':
+          description: Consent recorded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConsentPublic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    get:
+      tags: [compliance]
+      summary: List recorded consents for current user
+      responses:
+        '200':
+          description: List
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/ConsentPublic' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /users/me/export:
+    get:
+      tags: [compliance]
+      summary: Queue an async data-export job; email link when ready
+      responses:
+        '200':
+          description: Queued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /users/me:
+    delete:
+      tags: [compliance]
+      summary: Delete account — cancels Stripe sub, soft-deletes, 30-day purge
+      responses:
+        '200':
+          description: Scheduled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /notifications:
+    get:
+      tags: [notification]
+      summary: List notifications for current user
+      responses:
+        '200':
+          description: List
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/NotificationPublic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /notifications/{notificationId}/read:
+    parameters:
+      - { name: notificationId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [notification]
+      summary: Mark notification as read
+      responses:
+        '200':
+          description: Marked
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/ping:
+    get:
+      tags: [admin]
+      summary: Admin ping (role-gated)
+      responses:
+        '200':
+          description: Pong
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        15-minute access token from `/auth/login`. Rotate using `/auth/refresh`.
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Forbidden:
+      description: Forbidden
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Conflict:
+      description: Conflict
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    PaymentRequired:
+      description: Active subscription required
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    ValidationFailed:
+      description: Validation failed
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    RateLimited:
+      description: Too many requests
+      headers:
+        Retry-After:
+          schema: { type: integer }
+          description: Seconds until next attempt allowed
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    BadGateway:
+      description: Upstream broker error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    ServiceUnavailable:
+      description: Service unavailable
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  schemas:
+    ErrorBody:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Stable machine-readable error code
+          example: AUTH_INVALID_CREDENTIALS
+        message:
+          type: string
+          example: Invalid email or password.
+        details:
+          type: object
+          additionalProperties: true
+        traceId:
+          type: string
+          description: Correlate with logs and distributed traces
+          example: 5f1f1c2a-3b22-4d04-90b7-d9a4e3a8f2e1
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error: { $ref: '#/components/schemas/ErrorBody' }
+
+    MessageResponse:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string }
+
+    SignupRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 12, maxLength: 128, format: password }
+        display_name: { type: string, maxLength: 120, nullable: true }
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, format: password }
+        totp_code: { type: string, pattern: '^\d{6}$', nullable: true }
+
+    TokenPair:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in]
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+        token_type: { type: string, default: Bearer }
+        expires_in: { type: integer, description: Access token TTL (seconds) }
+
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token: { type: string }
+
+    LogoutRequest:
+      type: object
+      properties:
+        refresh_token: { type: string, nullable: true }
+
+    VerifyEmailRequest:
+      type: object
+      required: [token]
+      properties:
+        token: { type: string }
+
+    ForgotPasswordRequest:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+
+    ResetPasswordRequest:
+      type: object
+      required: [token, new_password]
+      properties:
+        token: { type: string }
+        new_password: { type: string, minLength: 12, maxLength: 128, format: password }
+
+    TotpEnrollResponse:
+      type: object
+      required: [secret, provisioning_uri]
+      properties:
+        secret: { type: string }
+        provisioning_uri: { type: string }
+
+    TotpVerifyRequest:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string, pattern: '^\d{6}$' }
+
+    UserPublic:
+      type: object
+      required: [id, email, is_email_verified, totp_enabled, is_admin, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        display_name: { type: string, nullable: true }
+        is_email_verified: { type: boolean }
+        totp_enabled: { type: boolean }
+        is_admin: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    UserUpdateRequest:
+      type: object
+      properties:
+        display_name: { type: string, maxLength: 120, nullable: true }
+
+    BrokerAccountCreateRequest:
+      type: object
+      required: [broker, label, credentials]
+      properties:
+        broker: { type: string, enum: [exness_mt5, binance] }
+        label: { type: string, minLength: 1, maxLength: 120 }
+        account_type: { type: string, enum: [demo, live], default: demo }
+        credentials:
+          type: object
+          additionalProperties: true
+          description: Broker-specific. Encrypted at rest (AES-256-GCM envelope).
+
+    BrokerAccountUpdateRequest:
+      type: object
+      properties:
+        label: { type: string, maxLength: 120, nullable: true }
+        is_active: { type: boolean, nullable: true }
+        credentials: { type: object, additionalProperties: true, nullable: true }
+
+    BrokerAccountPublic:
+      type: object
+      required: [id, broker, label, account_type, is_active, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        broker: { type: string }
+        label: { type: string }
+        account_type: { type: string }
+        is_active: { type: boolean }
+        last_connection_check_status: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    BrokerConnectionTestResponse:
+      type: object
+      required: [ok, broker, account_id]
+      properties:
+        ok: { type: boolean }
+        broker: { type: string }
+        account_id: { type: string, format: uuid }
+        latency_ms: { type: integer, nullable: true }
+        detail: { type: string, nullable: true }
+
+    StrategyPublic:
+      type: object
+      required: [id, code, name, instrument, timeframe, default_params]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        instrument: { type: string }
+        timeframe: { type: string }
+        default_params: { type: object, additionalProperties: true }
+
+    StrategyInstanceCreateRequest:
+      type: object
+      required: [strategy_code, broker_account_id, label]
+      properties:
+        strategy_code: { type: string }
+        broker_account_id: { type: string, format: uuid }
+        label: { type: string, minLength: 1, maxLength: 120 }
+        params: { type: object, additionalProperties: true }
+        risk_config: { type: object, additionalProperties: true }
+
+    StrategyInstanceUpdateRequest:
+      type: object
+      properties:
+        label: { type: string, maxLength: 120, nullable: true }
+        params: { type: object, additionalProperties: true, nullable: true }
+        risk_config: { type: object, additionalProperties: true, nullable: true }
+
+    StrategyInstancePublic:
+      type: object
+      required: [id, strategy_id, broker_account_id, label, status, params, risk_config, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        strategy_id: { type: string, format: uuid }
+        broker_account_id: { type: string, format: uuid }
+        label: { type: string }
+        status: { type: string, enum: [draft, running, paused, stopped, killed, errored] }
+        params: { type: object, additionalProperties: true }
+        risk_config: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    BacktestCreateRequest:
+      type: object
+      required: [strategy_code, range_start, range_end, initial_balance]
+      properties:
+        strategy_code: { type: string }
+        params: { type: object, additionalProperties: true }
+        range_start: { type: string, format: date }
+        range_end: { type: string, format: date }
+        initial_balance: { type: number, exclusiveMinimum: 0, maximum: 10000000 }
+
+    BacktestPublic:
+      type: object
+      required: [id, strategy_id, status, range_start, range_end, initial_balance, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        strategy_id: { type: string, format: uuid }
+        status: { type: string, enum: [queued, running, succeeded, failed, cancelled] }
+        range_start: { type: string, format: date }
+        range_end: { type: string, format: date }
+        initial_balance: { type: number }
+        profit_factor: { type: number, nullable: true }
+        max_drawdown_pct: { type: number, nullable: true }
+        sharpe_ratio: { type: number, nullable: true }
+        win_rate_pct: { type: number, nullable: true }
+        total_trades: { type: integer, nullable: true }
+        net_profit: { type: number, nullable: true }
+        error_message: { type: string, nullable: true }
+        completed_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    CheckoutSessionRequest:
+      type: object
+      required: [plan_code]
+      properties:
+        plan_code: { type: string, enum: [trial, pro_monthly, pro_yearly, lifetime] }
+        success_url: { type: string, format: uri, nullable: true }
+        cancel_url: { type: string, format: uri, nullable: true }
+
+    CheckoutSessionResponse:
+      type: object
+      required: [url, session_id]
+      properties:
+        url: { type: string, format: uri }
+        session_id: { type: string }
+
+    CustomerPortalResponse:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string, format: uri }
+
+    SubscriptionPublic:
+      type: object
+      properties:
+        id: { type: string, format: uuid, nullable: true }
+        plan:
+          type: string
+          enum: [free, trial, pro_monthly, pro_yearly, lifetime]
+        status:
+          type: string
+          enum: [inactive, trialing, active, past_due, canceled, incomplete, unpaid]
+        current_period_end: { type: string, format: date-time, nullable: true }
+        cancel_at_period_end: { type: boolean, default: false }
+        stripe_customer_id: { type: string, nullable: true }
+
+    InvoicePublic:
+      type: object
+      required: [id, stripe_invoice_id, amount_cents, currency, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        stripe_invoice_id: { type: string }
+        amount_cents: { type: integer, minimum: 0 }
+        currency: { type: string }
+        status: { type: string }
+        paid_at: { type: string, format: date-time, nullable: true }
+        hosted_invoice_url: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    BillingMePublic:
+      type: object
+      required: [subscription, invoices]
+      properties:
+        subscription: { $ref: '#/components/schemas/SubscriptionPublic' }
+        invoices:
+          type: array
+          items: { $ref: '#/components/schemas/InvoicePublic' }
+
+    PlanDescriptor:
+      type: object
+      required: [code, name, price_cents, currency, interval, description]
+      properties:
+        code: { type: string, enum: [trial, pro_monthly, pro_yearly, lifetime] }
+        name: { type: string }
+        price_cents: { type: integer, minimum: 0 }
+        currency: { type: string, default: usd }
+        interval: { type: string, enum: [once, month, year, trial] }
+        trial_days: { type: integer, nullable: true }
+        description: { type: string }
+        features: { type: array, items: { type: string } }
+        stripe_price_id: { type: string, nullable: true }
+
+    PlansResponse:
+      type: object
+      required: [plans]
+      properties:
+        plans:
+          type: array
+          items: { $ref: '#/components/schemas/PlanDescriptor' }
+
+    GateCheck:
+      type: object
+      required: [name, passed]
+      properties:
+        name: { type: string }
+        passed: { type: boolean }
+        detail: { type: string, nullable: true }
+
+    GateResult:
+      type: object
+      required: [passed, failed_checks, checks]
+      properties:
+        passed: { type: boolean }
+        failed_checks: { type: array, items: { $ref: '#/components/schemas/GateCheck' } }
+        warnings: { type: array, items: { $ref: '#/components/schemas/GateCheck' } }
+        checks: { type: array, items: { $ref: '#/components/schemas/GateCheck' } }
+
+    LiveConsentRequest:
+      type: object
+      required: [strategy_code, risk_acknowledged]
+      properties:
+        strategy_code: { type: string }
+        risk_acknowledged: { type: boolean }
+        version: { type: string, default: v1 }
+
+    LiveConsentPublic:
+      type: object
+      required: [id, strategy_code, version, risk_acknowledged, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        strategy_code: { type: string }
+        version: { type: string }
+        risk_acknowledged: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    StrategyInstanceHealth:
+      type: object
+      required: [instance_id, status]
+      properties:
+        instance_id: { type: string, format: uuid }
+        status: { type: string }
+        last_heartbeat_at: { type: string, format: date-time, nullable: true }
+        last_signal_at: { type: string, format: date-time, nullable: true }
+        open_positions: { type: integer, default: 0 }
+        daily_loss_cents: { type: integer, default: 0 }
+        kill_switch_armed: { type: boolean }
+
+    ConsentRequest:
+      type: object
+      required: [kind, version, accepted]
+      properties:
+        kind: { type: string, enum: [tos, privacy, marketing, data_processing] }
+        version: { type: string }
+        accepted: { type: boolean }
+
+    ConsentPublic:
+      type: object
+      required: [id, kind, version, accepted, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [tos, privacy, marketing, data_processing] }
+        version: { type: string }
+        accepted: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    NotificationPublic:
+      type: object
+      required: [id, kind, title, body, is_read, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string }
+        title: { type: string }
+        body: { type: string }
+        is_read: { type: boolean }
+        created_at: { type: string, format: date-time }

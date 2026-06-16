@@ -1,0 +1,17 @@
+# --------------------------------------------------------------------------
+# Procfile — Trading Engine on Railway
+#
+# web: FastAPI server hosting:
+#   - /healthz                       (Railway healthcheck)
+#   - /live/start|stop|kill|status   (Atlas-called orchestration)
+#   - /backtest/*                    (queued backtests)
+#   - /signals, /strategies          (read endpoints)
+#
+# The LiveEngine instances run as in-process threads spawned by /live/start
+# (see live/router.py — `_REGISTRY: dict[str, LiveEngine]`). One web service
+# = one supervisor process = N engine threads. Phase 3 will split engines
+# into their own worker processes; until then, do NOT run a separate
+# `live_engine` worker — the in-process registry would diverge across
+# replicas. Pin trading-engine to numReplicas=1 in railway.json.
+# --------------------------------------------------------------------------
+web: uvicorn server:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'

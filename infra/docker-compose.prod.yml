@@ -1,0 +1,492 @@
+# ============================================================================
+# infra/docker-compose.prod.yml — Production overrides (Phase 2)
+# ============================================================================
+# Owner: Hestia Kaoru (DevOps / SRE)
+# Last updated: 2026-06-15
+#
+# Apply with:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# Or via:
+#   make deploy-prod
+#
+# Differences vs base (infra/docker-compose.yml):
+#   - Caddy added as the only public-facing service (80/443)
+#   - Postgres/Redis exposed only inside the internal network (no host port)
+#   - Bind-mount data volumes to host paths under /srv/forex-bot/data/* so the
+#     operator can snapshot them with the host backup tool
+#   - Restart: unless-stopped everywhere (was "always" — we want SIGTERM to
+#     stop services during deploys)
+#   - JSON-file log rotation tightened (10m × 3 files = 30 MB/container ceiling)
+#   - Healthchecks aggressive (10s interval, 3s timeout, 3 retries)
+#   - All passwords/secrets sourced from .env.prod (chmod 600, owned root)
+#   - Loki + Promtail + Alertmanager added (full observability stack)
+#   - cAdvisor + node-exporter + postgres-exporter + redis-exporter for metrics
+# ============================================================================
+
+name: forex-bot
+
+# Prod-only network — keeps Prometheus/Grafana/Loki traffic off the public
+# `edge` network. Base file (dev) doesn't need this isolation.
+networks:
+  observability:
+    name: forex-bot-observability
+    driver: bridge
+
+# Tighter logging defaults — Loki holds the searchable copy.
+x-logging: &prod-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+    labels: "service,env"
+
+x-prod-healthcheck: &prod-healthcheck
+  interval: 10s
+  timeout: 3s
+  retries: 3
+  start_period: 30s
+
+# Restart policy — unless-stopped lets `docker compose down` actually stop
+# services, but recovers them on host reboot or daemon restart.
+x-restart: &restart unless-stopped
+
+# Host paths for data persistence — bind-mounted so external backup tools
+# (pg_dump cron, restic, BorgBackup) can see them on the host.
+# Operator must `sudo install -d -o 1000 -g 1000 /srv/forex-bot/data/{postgres,postgres-wal,redis,prometheus,grafana,loki,caddy}`
+# before first `up`.
+
+services:
+
+  # ==========================================================================
+  # caddy — reverse proxy + auto-HTTPS via Let's Encrypt
+  # ==========================================================================
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: forex-bot-caddy
+    restart: *restart
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /srv/forex-bot/data/caddy/data:/data
+      - /srv/forex-bot/data/caddy/config:/config
+      - /srv/forex-bot/data/caddy/logs:/var/log/caddy
+    environment:
+      DOMAIN: ${DOMAIN:-forexbot.example.com}
+      API_DOMAIN: ${API_DOMAIN:-api.forexbot.example.com}
+      ACME_EMAIL: ${ACME_EMAIL:-ops@forexbot.example.com}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
+    healthcheck:
+      <<: *prod-healthcheck
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:2019/config/"]
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    networks:
+      - edge
+      - internal
+    logging: *prod-logging
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+
+  # ==========================================================================
+  # postgres — internal only
+  # ==========================================================================
+  postgres:
+    restart: *restart
+    ports: !reset [] # remove any host port exposure
+    environment:
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C --data-checksums"
+    volumes: !override
+      - /srv/forex-bot/data/postgres:/var/lib/postgresql/data
+      - /srv/forex-bot/data/postgres-wal:/var/lib/postgresql/wal
+    healthcheck:
+      <<: *prod-healthcheck
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 4G
+        reservations:
+          cpus: "1.0"
+          memory: 1G
+    logging: *prod-logging
+
+  # ==========================================================================
+  # redis — internal only, AOF persistence
+  # ==========================================================================
+  redis:
+    restart: *restart
+    ports: !reset []
+    command:
+      - "redis-server"
+      - "--appendonly"
+      - "yes"
+      - "--appendfsync"
+      - "everysec"
+      - "--maxmemory"
+      - "768mb"
+      - "--maxmemory-policy"
+      - "allkeys-lru"
+      - "--requirepass"
+      - "${REDIS_PASSWORD}"
+    volumes: !override
+      - /srv/forex-bot/data/redis:/data
+    healthcheck:
+      <<: *prod-healthcheck
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    logging: *prod-logging
+
+  # ==========================================================================
+  # backend — FastAPI, 2 replicas behind Caddy.
+  # We use `!reset` on container_name so docker-compose can pick a unique
+  # <project>_backend_<n> name for each replica. Setting both replicas>1 AND
+  # a fixed container_name is a docker-compose error ("must be unique").
+  # ==========================================================================
+  backend:
+    container_name: !reset null
+    restart: *restart
+    ports: !reset [] # Caddy fronts this
+    volumes: !reset [] # no dev mounts — code lives in the image
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      LOG_LEVEL: INFO
+      WORKERS: "4"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://tempo:4318"
+    command:
+      - "gunicorn"
+      - "app.main:app"
+      - "--workers"
+      - "4"
+      - "--worker-class"
+      - "uvicorn.workers.UvicornWorker"
+      - "--bind"
+      - "0.0.0.0:8000"
+      - "--access-logfile"
+      - "-"
+      - "--error-logfile"
+      - "-"
+      - "--timeout"
+      - "60"
+      - "--graceful-timeout"
+      - "30"
+      - "--keep-alive"
+      - "5"
+      - "--max-requests"
+      - "10000"
+      - "--max-requests-jitter"
+      - "1000"
+    healthcheck:
+      <<: *prod-healthcheck
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8000/healthz"]
+    deploy:
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 30s
+        order: start-first
+        failure_action: rollback
+        monitor: 60s
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 5
+        window: 120s
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    logging: *prod-logging
+
+  # ==========================================================================
+  # frontend — Next.js production server (replicated).
+  # See backend note above: container_name reset so replicas>1 works.
+  # ==========================================================================
+  frontend:
+    container_name: !reset null
+    restart: *restart
+    ports: !reset []
+    volumes: !reset []
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: https://${API_DOMAIN:-api.forexbot.example.com}/api/v1
+    healthcheck:
+      <<: *prod-healthcheck
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000/api/health"]
+    deploy:
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 30s
+        order: start-first
+        failure_action: rollback
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 5
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    logging: *prod-logging
+
+  # ==========================================================================
+  # trading-engine — signal generator (singleton)
+  # NOTE: not present in base compose (dev uses trading-engine-worker only).
+  # In prod we run the full HTTP server which exposes /live/start|stop.
+  # ==========================================================================
+  trading-engine:
+    build:
+      context: ../trading-engine
+      dockerfile: Dockerfile
+    image: forex-bot/trading-engine:${IMAGE_TAG:-local}
+    container_name: forex-bot-trading-engine
+    restart: *restart
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports: !reset []
+    volumes:
+      - /srv/forex-bot/data/engine:/app/data
+    environment:
+      MODE: live-via-supervisor
+      APP_ENV: production
+      MT5_BRIDGE_URL: ${MT5_BRIDGE_URL}
+      MT5_BRIDGE_MTLS_CERT: /etc/forex-bot/bridge-client.crt
+      MT5_BRIDGE_MTLS_KEY: /etc/forex-bot/bridge-client.key
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 10s
+        max_attempts: 5
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "1.0"
+          memory: 1G
+    logging: *prod-logging
+
+  # ==========================================================================
+  # observability
+  # ==========================================================================
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: forex-bot-prometheus
+    restart: *restart
+    ports: !reset [] # access via Caddy /grafana → Grafana → Prom datasource only
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=90d"
+      - "--storage.tsdb.retention.size=24GB"
+      - "--web.enable-lifecycle"
+      - "--web.external-url=https://grafana.${DOMAIN}/prometheus"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts:/etc/prometheus/alerts:ro
+      - /srv/forex-bot/data/prometheus:/prometheus
+    healthcheck:
+      <<: *prod-healthcheck
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:9090/-/healthy"]
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    networks:
+      - observability
+      - internal
+    logging: *prod-logging
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: forex-bot-alertmanager
+    restart: *restart
+    volumes:
+      - ./observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - /srv/forex-bot/data/alertmanager:/alertmanager
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+      - "--web.external-url=https://grafana.${DOMAIN}/alertmanager"
+    environment:
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
+      PAGERDUTY_ROUTING_KEY: ${PAGERDUTY_ROUTING_KEY:-}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-alerts@example.com}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+    healthcheck:
+      <<: *prod-healthcheck
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:9093/-/healthy"]
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    networks:
+      - observability
+    logging: *prod-logging
+
+  grafana:
+    restart: *restart
+    ports: !reset []
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SERVER_ROOT_URL: https://grafana.${DOMAIN}
+      GF_SERVER_SERVE_FROM_SUB_PATH: "false"
+      GF_SMTP_ENABLED: "true"
+      GF_SMTP_HOST: ${SMTP_HOST}
+      GF_SMTP_USER: ${SMTP_USER}
+      GF_SMTP_PASSWORD: ${SMTP_PASSWORD}
+      GF_SMTP_FROM_ADDRESS: alerts@${DOMAIN}
+    volumes:
+      - /srv/forex-bot/data/grafana:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+    logging: *prod-logging
+
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: forex-bot-loki
+    restart: *restart
+    command:
+      - "-config.file=/etc/loki/loki-config.yml"
+    ports: !reset []
+    volumes:
+      - ./loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - /srv/forex-bot/data/loki:/loki
+    networks:
+      - observability
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2G
+    logging: *prod-logging
+
+  promtail:
+    image: grafana/promtail:3.0.0
+    container_name: forex-bot-promtail
+    restart: *restart
+    command:
+      - "-config.file=/etc/promtail/promtail-config.yml"
+    volumes:
+      - ./promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/log:/var/log:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - observability
+    depends_on:
+      - loki
+    logging: *prod-logging
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: forex-bot-node-exporter
+    restart: *restart
+    command:
+      - "--path.rootfs=/host"
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+    networks:
+      - observability
+    logging: *prod-logging
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: forex-bot-cadvisor
+    restart: *restart
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
+    networks:
+      - observability
+    logging: *prod-logging
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: forex-bot-postgres-exporter
+    restart: *restart
+    environment:
+      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+    networks:
+      - internal
+      - observability
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging: *prod-logging
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    container_name: forex-bot-redis-exporter
+    restart: *restart
+    environment:
+      REDIS_ADDR: "redis://redis:6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 64M
+    networks:
+      - internal
+      - observability
+    depends_on:
+      redis:
+        condition: service_healthy
+    logging: *prod-logging
