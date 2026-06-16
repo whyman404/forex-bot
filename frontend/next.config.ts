@@ -94,8 +94,8 @@ const serverActionAllowedOrigins = [
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
-  // standalone keeps Vercel's auto-detection happy AND lets Docker/Railway reuse the same build.
-  output: "standalone",
+  // standalone breaks Vercel route mapping for App Router groups; only enable for Docker/Railway via env.
+  ...(process.env.NEXT_OUTPUT_STANDALONE === "true" ? { output: "standalone" as const } : {}),
   poweredByHeader: false,
   compress: true,
   // Lint warnings should not fail Vercel deploy; CI lint job catches them on push.
