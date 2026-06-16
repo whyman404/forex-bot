@@ -51,9 +51,7 @@
     }
   ],
   "redirects": [
-    { "source": "/home", "destination": "/", "permanent": true },
-    { "source": "/signup", "destination": "/auth/register", "permanent": false },
-    { "source": "/login", "destination": "/auth/login", "permanent": false }
+    { "source": "/home", "destination": "/", "permanent": true }
   ],
   "rewrites": [],
   "cleanUrls": true,
