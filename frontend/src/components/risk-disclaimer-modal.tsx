@@ -16,7 +16,9 @@ import { ApiError } from "@/lib/api";
 import { t } from "@/lib/i18n";
 
 const STORAGE_KEY = "forex-bot.risk-disclaimer.version";
-const CURRENT_VERSION = "1.0.0";
+// Bumped to 1.1.0 in Round 5 — adds TradingView signal disclaimer paragraph.
+// Existing users will re-see the modal on next visit.
+const CURRENT_VERSION = "1.1.0";
 
 interface RiskDisclaimerModalProps {
   /** When true the modal will auto-open if the user has not yet accepted this version. */
@@ -81,6 +83,20 @@ export function RiskDisclaimerModal({
             <li>You are responsible for the parameters you choose.</li>
             <li>We may pause your strategies during exchange outages or risk events.</li>
           </ul>
+          <section
+            aria-labelledby="tv-signal-disclaimer"
+            className="rounded-md border border-warn/40 bg-warn/5 p-3"
+          >
+            <h3 id="tv-signal-disclaimer" className="text-xs font-semibold uppercase tracking-wide">
+              TradingView signals
+            </h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Signals from TradingView are <strong>informational only</strong> and not financial
+              advice. Our platform forwards them as-is to your account based on your gate
+              settings. We do not produce, validate, or guarantee signal quality, and we are not
+              responsible for trading outcomes that result from external signals.
+            </p>
+          </section>
           <label className="flex cursor-pointer items-center gap-2 rounded-md border p-2">
             <input
               type="checkbox"

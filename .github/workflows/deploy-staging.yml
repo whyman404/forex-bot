@@ -1,0 +1,95 @@
+# ============================================================================
+# .github/workflows/deploy-staging.yml
+# ============================================================================
+# Triggered on every push to main after CI passes.
+# Deploys to the staging Linux VPS via SSH + docker compose pull/up.
+# ============================================================================
+
+name: deploy-staging
+
+on:
+  workflow_run:
+    workflows: [ci]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (default: sha-<commit>)"
+        required: false
+        type: string
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: https://staging.forex-bot.app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.image_tag }}" ]; then
+            echo "tag=${{ inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=sha-${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.STAGING_SSH_KEY }}
+
+      - name: Add host to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.STAGING_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+          STAGING_USER: deploy
+        run: |
+          ssh ${STAGING_USER}@${STAGING_HOST} bash -s <<'EOSSH'
+            set -euxo pipefail
+            cd /opt/forex-bot
+            git fetch --depth=1 origin main
+            git checkout FETCH_HEAD
+            export IMAGE_TAG="${IMAGE_TAG}"
+            echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans
+            docker image prune -f
+          EOSSH
+
+      - name: Smoke test
+        run: |
+          for i in 1 2 3 4 5; do
+            if curl -fsS https://staging-api.forex-bot.app/healthz; then
+              echo "staging healthy"
+              exit 0
+            fi
+            sleep 6
+          done
+          echo "staging failed health check"
+          exit 1
+
+      - name: Notify Discord
+        if: always()
+        run: |
+          STATUS=${{ job.status }}
+          curl -fsS -X POST -H "Content-Type: application/json" \
+            -d "{\"content\":\"staging deploy: ${STATUS} @ sha-${{ github.sha }}\"}" \
+            ${{ secrets.DISCORD_WEBHOOK }} || true

@@ -87,6 +87,52 @@ grid_bot:
   enabled: true                 # set false if not in mean-reverting regime
 
 # ---------------------------------------------------------------------------
+# TradingView Signal Follow (R4 — multi-timeframe TV recommendation)
+# ---------------------------------------------------------------------------
+# This strategy uses TradingView's public technical-analysis recommendation
+# (via the `tradingview-ta` PyPI lib) as the signal source. We layer multi-TF
+# agreement + ATR-based SL/TP + cool-down to keep entries selective.
+#
+# IMPORTANT (per upstream `tradingview-mcp` disclaimer): TV signals are
+# informational and NOT financial advice. The strategy is a SIGNAL FOLLOWER,
+# not an authority. All trades still pass through our RiskManager + bridge.
+#
+# Backtest caveat: the live signals are not available historically, so
+# backtest mode uses a local RSI+EMA proxy. Treat backtest numbers as
+# directional only — live performance will differ.
+tv_signal:
+  display_name: "TradingView Signal Follow"
+  asset_class: multi
+  risk_rating: medium
+  description: "Follows TradingView multi-timeframe recommendation with ATR-based risk management."
+  symbol: XAUUSD
+  timeframe: M15
+  default_params:
+    intervals: ["15m","1h","4h"]
+    entry_score_threshold: 60
+    exit_score_threshold: 20
+    sl_atr_mult: 1.5
+    tp_atr_mult: 3.0
+    min_agreement_pct: 0.6
+    cool_down_min: 60
+    atr_period: 14
+  params:
+    intervals: ["15m","1h","4h"]
+    entry_score_threshold: 60
+    exit_score_threshold: 20
+    sl_atr_mult: 1.5
+    tp_atr_mult: 3.0
+    min_agreement_pct: 0.6
+    cool_down_min: 60
+    atr_period: 14
+  risk_per_trade_pct: 1.0
+  enabled: true
+  warnings:
+    - "TradingView signals are informational and not financial advice (per tradingview-mcp disclaimer)."
+    - "Live signals require internet access to TradingView; the engine HALTS (does not trade blindly) if TV is unreachable."
+    - "Backtest is an approximation — it uses a local RSI+EMA proxy because tradingview-ta returns LIVE recommendations only."
+
+# ---------------------------------------------------------------------------
 # Account-level risk limits applied to ALL strategies above.
 # ---------------------------------------------------------------------------
 risk:

@@ -12,6 +12,13 @@
 All four paths share 100% of the application code — only the infrastructure
 differs. The "honest status" of every feature is in [STATUS.md](STATUS.md).
 
+**Strategy catalog (as of Phase 3): 7 strategies** —
+`london_breakout`, `ny_killzone`, `ema_adx`, `ema_rsi`, `donchian`, `grid`,
+plus `tv_signal` (TradingView multi-TF follow). `tv_signal` is **paper-only by
+default** and requires the Argus "Section TV launch checklist" sign-off before
+any instance can be flipped live. Set `TV_ENABLED=false` to hide the strategy
+entirely.
+
 ---
 
 ### Path 1 details — Laptop dev

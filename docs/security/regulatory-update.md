@@ -175,6 +175,54 @@ Cyber + E&O insurance (when budget allows) provides backup beyond contractual ca
 
 ---
 
+## 8b. Third-Party Signal Sources (Phase 3a — TradingView)
+
+> Added 2026-06-16 in connection with TradingView integration. Reads with `tradingview-integration-risk.md` + `disclaimers-v2.md`.
+
+**Position:** acting on third-party informational signals does NOT make us an investment adviser in TH or most SEA jurisdictions, **provided** we:
+- (a) do not modify, supplement, or curate the signals (we route as-is);
+- (b) do not present individual recommendations to specific users ("you should buy");
+- (c) user **chose** the strategy template and **set** thresholds (no auto-tuning by us);
+- (d) we disclose clearly that signals are 3rd-party and informational only;
+- (e) we do not earn revenue tied to signal accuracy or to a referral from the data source.
+
+**Risk if we cross any of (a)-(e):** could be treated as "personal recommendation" (MiFID II in EU) or "investment advice" (TH SEC), triggering licensing requirements.
+
+### Required disclaimer wording (every TV-related UI surface)
+
+> *"TradingView signals are informational only and do not constitute investment advice. Past performance does not guarantee future results."*
+
+Applies to:
+- Strategy template marketing pages.
+- Strategy configuration screen.
+- Signal preview screen.
+- Per-signal log entry (shorter form: "Source: TradingView — informational").
+- Backtest result screens using TV signals.
+- Email notifications mentioning TV-driven trades.
+- Risk Disclosure document (full Section — see `disclaimers-v2.md` Section 3.2).
+
+### Geo-block restated
+
+The TradingView feature does NOT change geo-block:
+- US — **BLOCKED** (existing).
+- Sanctioned jurisdictions — **BLOCKED** (existing).
+- ID / PH / VN — **BLOCKED** pending legal review (existing).
+- TH / EU / UK / AU / SG / MY — TV feature available subject to country's existing tier.
+
+### Marketing constraint
+
+Performance numbers from TV-signal strategies require the same disclaimer block as any other backtest (see Section 5).
+**Additionally:** label as "Computed using TradingView technical analysis. Why Man 404 does not validate or endorse these results."
+
+### Action items
+
+🔴 **R10** Thai counsel notified of TV integration; written opinion on whether third-party signal routing affects exemption status.
+🔴 **R11** EU counsel notified — confirm MiFID II "personal recommendation" boundary is preserved by user-set thresholds model.
+🔴 **R12** Required disclaimer wording deployed on every TV UI surface.
+🔴 **R13** Cease-and-desist response plan documented (`tradingview-integration-risk.md` Section 3.3 Plan B).
+
+---
+
 ## 9. What to Push Off Until We Talk to Counsel
 
 - Public marketing with performance numbers (delay until disclosure language reviewed).

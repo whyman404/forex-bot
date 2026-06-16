@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { toast } from "sonner";
-import { AlertTriangle, ShieldAlert } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ShieldAlert, XCircle } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -21,6 +21,7 @@ import {
   useLiveEligibility,
   useSignLiveConsent,
 } from "@/hooks/use-live-trading";
+import { useTVHealthOk } from "@/hooks/use-tradingview";
 import { ApiError } from "@/lib/api";
 
 const REQUIRED_PHRASE = "GO LIVE";
@@ -30,6 +31,12 @@ interface LiveTradingModalProps {
   onOpenChange: (open: boolean) => void;
   instanceId: string;
   instanceLabel: string;
+  /**
+   * Strategy code of the instance. When set to "tv_signal", an extra gate is
+   * enforced: TradingView health must report `ok` before the user can submit.
+   * The check polls every 30s via useTVHealth.
+   */
+  strategyCode?: string | null;
   onSuccess?: () => void;
 }
 
@@ -48,11 +55,15 @@ export function LiveTradingModal({
   onOpenChange,
   instanceId,
   instanceLabel,
+  strategyCode,
   onSuccess,
 }: LiveTradingModalProps): React.ReactElement {
   const eligibility = useLiveEligibility(open ? instanceId : null);
   const signConsent = useSignLiveConsent();
   const goLive = useGoLive(instanceId);
+
+  const isTVSignal = strategyCode === "tv_signal";
+  const tvHealth = useTVHealthOk();
 
   const [phrase, setPhrase] = React.useState("");
   const [accepted, setAccepted] = React.useState(false);
@@ -70,9 +81,13 @@ export function LiveTradingModal({
   const passed = eligibility.data?.gates.filter((g) => g.passed).length ?? 0;
   const total = eligibility.data?.gates.length ?? 0;
   const phraseMatches = phrase.trim() === REQUIRED_PHRASE;
-  const consentVersion = eligibility.data?.required_consent_version ?? "1.0.0";
+  const consentVersion = eligibility.data?.required_consent_version ?? "1.1.0";
 
-  const canSubmit = allGatesPassed && phraseMatches && accepted && !submitting;
+  // tv_signal: TradingView health must be OK before going live.
+  const tvGatePasses = !isTVSignal || tvHealth.ok;
+
+  const canSubmit =
+    allGatesPassed && phraseMatches && accepted && tvGatePasses && !submitting;
 
   async function handleSubmit(e: React.FormEvent): Promise<void> {
     e.preventDefault();
@@ -129,6 +144,39 @@ export function LiveTradingModal({
               <GateCheckList gates={eligibility.data?.gates ?? []} />
             )}
           </section>
+
+          {/* Extra TV gate for tv_signal instances */}
+          {isTVSignal && (
+            <section
+              aria-labelledby="tv-gate-heading"
+              className={[
+                "rounded-md border p-3 text-sm",
+                tvGatePasses
+                  ? "border-profit/40 bg-profit/5"
+                  : "border-destructive/40 bg-destructive/5",
+              ].join(" ")}
+            >
+              <h3 id="tv-gate-heading" className="flex items-center gap-2 text-sm font-semibold">
+                {tvGatePasses ? (
+                  <CheckCircle2 className="h-4 w-4 text-profit" aria-hidden="true" />
+                ) : (
+                  <XCircle className="h-4 w-4 text-destructive" aria-hidden="true" />
+                )}
+                TradingView health
+              </h3>
+              <p className="mt-1 text-xs text-muted-foreground" aria-live="polite">
+                {tvHealth.loading
+                  ? "Checking TradingView integration…"
+                  : tvGatePasses
+                    ? "TradingView is responding normally. Signals can be routed to your broker."
+                    : (tvHealth.reason ??
+                      "TradingView health check failed. You cannot go live with tv_signal until this clears.")}
+              </p>
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                Auto-polled every 30 seconds. Required for tv_signal instances only.
+              </p>
+            </section>
+          )}
 
           {/* Risk acknowledgement */}
           <div className="space-y-2 rounded-md border border-warn/40 bg-warn/5 p-3 text-sm">
@@ -193,6 +241,11 @@ export function LiveTradingModal({
           {!allGatesPassed && eligibility.data ? (
             <p className="text-xs text-muted-foreground">
               Resolve the failing checks above before you can enable live trading.
+            </p>
+          ) : null}
+          {allGatesPassed && isTVSignal && !tvGatePasses ? (
+            <p className="text-xs text-destructive">
+              TradingView integration must be healthy before this strategy can go live.
             </p>
           ) : null}
         </form>

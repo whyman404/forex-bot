@@ -157,6 +157,17 @@ class Settings(BaseSettings):
     # CSV of CIDR / prefixes the internal endpoints prefer (HMAC is still primary).
     internal_trusted_proxy_cidrs: list[str] = Field(default_factory=list)
 
+    # ===== TradingView integration (Round 5) =====
+    # Kill switch — set false to fail-fast all /tv/* endpoints with 503 without
+    # touching the engine. Useful when TV upstream is having an outage and we
+    # want the UI to show a friendly degraded state.
+    tv_enabled: bool = True
+    # Per-user rate limit for the heavy `/tv/preview` endpoint (in addition to
+    # the per-tier limit). 10rpm matches frontend's `useTVPreview` cadence.
+    tv_preview_rate_limit_per_min: int = 10
+    # Symbol catalog cache TTL — the catalog is updated rarely; 1h is generous.
+    tv_catalog_cache_ttl_sec: int = 3600
+
     # ===== URLs (used in email templates + Stripe redirects) =====
     frontend_url: str = "http://localhost:3000"
     backend_public_url: str = "http://localhost:8000"

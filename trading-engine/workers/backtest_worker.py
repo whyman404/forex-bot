@@ -37,6 +37,7 @@ def _strategy_registry() -> dict[str, type]:
     from strategies.grid_bot import GridBotStrategy
     from strategies.london_breakout import LondonBreakoutStrategy
     from strategies.ny_killzone import NYKillzoneReversalStrategy
+    from strategies.tv_signal import TVSignalStrategy
 
     return {
         "london_breakout": LondonBreakoutStrategy,
@@ -45,6 +46,7 @@ def _strategy_registry() -> dict[str, type]:
         "ema_rsi_swing": EmaRsiSwingStrategy,
         "donchian_breakout": DonchianBreakoutStrategy,
         "grid_bot": GridBotStrategy,
+        "tv_signal": TVSignalStrategy,
     }
 
 

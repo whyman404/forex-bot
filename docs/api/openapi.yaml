@@ -54,6 +54,8 @@ tags:
     description: Admin-role-gated operational endpoints.
   - name: internal
     description: Trading-engine → backend (HMAC-signed; excluded from public spec).
+  - name: tradingview
+    description: TradingView signal proxy — preview, symbols, health (R5).
 
 paths:
   /auth/signup:
@@ -333,6 +335,70 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '502': { $ref: '#/components/responses/BadGateway' }
+
+  /tv/preview:
+    post:
+      tags: [tradingview]
+      summary: Multi-timeframe TradingView signal preview
+      description: |
+        Proxies to `trading-engine /tv/preview` and returns the rolled-up
+        analysis snapshot. Cached per `(symbol, exchange, intervals, user_id)`
+        for 60 s. Rate-limited per-user (default 10rpm) AND per-tier; the
+        stricter limit wins.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TVPreviewRequest' }
+            example:
+              symbol: XAUUSD
+              exchange: OANDA
+              intervals: [15m, 1h, 4h]
+      responses:
+        '200':
+          description: Preview
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TVPreview' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /tv/symbols:
+    get:
+      tags: [tradingview]
+      summary: List supported TradingView symbols
+      description: |
+        Returns the curated catalog the trading-engine supports. Cached in
+        Redis for `TV_CATALOG_CACHE_TTL_SEC` seconds (default 3600).
+      responses:
+        '200':
+          description: Catalog
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/TVSymbol' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /tv/health:
+    get:
+      tags: [tradingview]
+      summary: TradingView integration health (engine + TV upstream)
+      description: |
+        Used by the live-trading modal as an extra gate before allowing
+        `tv_signal` instances to go live. NEVER raises — always returns a
+        status body.
+      responses:
+        '200':
+          description: Health
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TVHealth' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
 
   /strategies:
     get:
@@ -1035,6 +1101,86 @@ components:
         instrument: { type: string }
         timeframe: { type: string }
         default_params: { type: object, additionalProperties: true }
+        requires_external_service:
+          type: boolean
+          default: false
+          description: |
+            R5 — when true, going live requires the external signal source
+            (e.g. TradingView for `tv_signal`) to be healthy. The live-gate
+            check `external_service_healthy` enforces this.
+
+    TVRecommendation:
+      type: string
+      enum: [STRONG_BUY, BUY, NEUTRAL, SELL, STRONG_SELL]
+      description: TradingView's per-indicator recommendation taxonomy.
+
+    TVTimeframeAnalysis:
+      type: object
+      required: [interval, recommendation, buy_count, sell_count, neutral_count]
+      properties:
+        interval: { type: string, example: 1h }
+        recommendation: { $ref: '#/components/schemas/TVRecommendation' }
+        buy_count: { type: integer, minimum: 0 }
+        sell_count: { type: integer, minimum: 0 }
+        neutral_count: { type: integer, minimum: 0 }
+
+    TVPreview:
+      type: object
+      required: [symbol, exchange, score, confidence, timeframes, generated_at]
+      properties:
+        symbol: { type: string, example: XAUUSD }
+        exchange: { type: string, example: OANDA }
+        score:
+          type: number
+          minimum: -100
+          maximum: 100
+          description: Normalized signal score (-100 = strong sell, +100 = strong buy).
+        confidence:
+          type: number
+          minimum: 0.0
+          maximum: 1.0
+          description: Confidence based on cross-TF agreement.
+        timeframes:
+          type: array
+          items: { $ref: '#/components/schemas/TVTimeframeAnalysis' }
+        generated_at:
+          type: string
+          format: date-time
+
+    TVPreviewRequest:
+      type: object
+      required: [symbol]
+      properties:
+        symbol: { type: string, minLength: 1, maxLength: 32 }
+        exchange: { type: string, maxLength: 16, nullable: true }
+        intervals:
+          type: array
+          minItems: 1
+          maxItems: 8
+          default: [15m, 1h, 4h]
+          items: { type: string, enum: [1m, 5m, 15m, 30m, 1h, 2h, 4h, 1d, 1W, 1M] }
+
+    TVSymbol:
+      type: object
+      required: [code, tv_symbol, tv_exchange, asset_class]
+      properties:
+        code: { type: string, example: XAUUSD }
+        tv_symbol: { type: string, example: XAUUSD }
+        tv_exchange: { type: string, example: OANDA }
+        asset_class:
+          type: string
+          enum: [gold, forex, crypto, index]
+        display_name: { type: string, example: 'Gold / USD (OANDA)' }
+
+    TVHealth:
+      type: object
+      required: [status, trading_engine_reachable, checked_at]
+      properties:
+        status: { type: string, enum: [ok, degraded, down] }
+        trading_engine_reachable: { type: boolean }
+        upstream_tv_reachable: { type: boolean, nullable: true }
+        reason: { type: string, nullable: true }
+        checked_at: { type: string, format: date-time }
 
     StrategyInstanceCreateRequest:
       type: object

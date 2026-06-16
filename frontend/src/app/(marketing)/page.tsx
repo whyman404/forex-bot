@@ -4,7 +4,14 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
-const STRATEGIES = [
+interface MarketingStrategy {
+  readonly name: string;
+  readonly asset: string;
+  readonly edge: string;
+  readonly informational?: boolean;
+}
+
+const STRATEGIES: readonly MarketingStrategy[] = [
   {
     name: "London Breakout",
     asset: "XAUUSD",
@@ -19,6 +26,12 @@ const STRATEGIES = [
   { name: "RSI Mean Reversion", asset: "EURUSD", edge: "Overbought/oversold fade on M15" },
   { name: "BTC Grid", asset: "BTCUSDT", edge: "Range-bound grid with dynamic exit" },
   { name: "XAUUSD Scalper", asset: "XAUUSD", edge: "M1/M5 scalp with tight risk" },
+  {
+    name: "TradingView Signal Follow",
+    asset: "MULTI",
+    edge: "Multi-timeframe TradingView consensus routed to MT5",
+    informational: true,
+  },
 ] as const;
 
 interface MarketingPlan {
@@ -37,7 +50,7 @@ const PLANS: readonly MarketingPlan[] = [
     price: "$0",
     perPeriod: " · 14 days",
     blurb: "Paper trading only",
-    features: ["All 6 strategies", "Unlimited backtest", "Paper trading", "Email support"],
+    features: ["All 7 strategies", "Unlimited backtest", "Paper trading", "Email support"],
   },
   {
     name: "Pro Monthly",
@@ -114,7 +127,7 @@ const FAQS = [
   },
   {
     q: "Can I use my own strategy?",
-    a: "Custom strategies are on the roadmap. For now you can tune parameters of the 6 included strategies and backtest freely.",
+    a: "Custom strategies are on the roadmap. For now you can tune parameters of the 7 included strategies and backtest freely. Our TradingView Signal Follow strategy lets you route external signals as-is, with safety gates.",
   },
 ] as const;
 
@@ -130,8 +143,9 @@ export default function MarketingPage() {
             Automated trading, <span className="text-brand">without guesswork</span>
           </h1>
           <p className="mt-6 text-lg text-muted-foreground">
-            Six battle-tested strategies for XAUUSD and BTC. Backtest in seconds, deploy to your
-            Exness MT5 in one click. Transparent metrics, no hype.
+            Seven battle-tested strategies — including TradingView signal follow — for XAUUSD, FX
+            and BTC. Backtest in seconds, deploy to your Exness MT5 in one click. Transparent
+            metrics, no hype.
           </p>
           <div className="mt-8 flex flex-wrap justify-center gap-3">
             <Button asChild variant="brand" size="lg">
@@ -154,7 +168,7 @@ export default function MarketingPage() {
       >
         <div className="mx-auto max-w-2xl text-center">
           <h2 id="strategies-title" className="text-3xl font-bold">
-            Six strategies. One platform.
+            Seven strategies. One platform.
           </h2>
           <p className="mt-2 text-muted-foreground">
             Each strategy is documented with entry/exit rules, risk model, and out-of-sample
@@ -163,13 +177,21 @@ export default function MarketingPage() {
         </div>
         <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {STRATEGIES.map((s) => (
-            <Card key={s.name}>
+            <Card key={s.name} className={s.informational ? "border-brand/40" : undefined}>
               <CardHeader>
                 <div className="flex items-center justify-between">
                   <CardTitle className="text-base">{s.name}</CardTitle>
                   <Badge variant="outline">{s.asset}</Badge>
                 </div>
                 <CardDescription>{s.edge}</CardDescription>
+                {s.informational && (
+                  <span
+                    role="note"
+                    className="mt-2 inline-flex w-fit items-center gap-1 rounded-md border border-warn/40 bg-warn/10 px-2 py-0.5 text-[11px] text-foreground"
+                  >
+                    Informational signals — not financial advice
+                  </span>
+                )}
               </CardHeader>
             </Card>
           ))}

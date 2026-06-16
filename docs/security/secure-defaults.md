@@ -377,6 +377,26 @@ When the team finds a gotcha not covered here, add it. Sec defaults grow with th
 - **Magic number namespace**: `hash(user_id, strategy_id)` per order; cross-namespace = reject.
 - **Quarterly rotation** + on RDP-anomaly + on incident.
 
+## 17. Phase 3a — TradingView Integration Rules (added 2026-06-16)
+
+> Authoritative defaults for `tv_signal`-family strategies. Read with `tradingview-integration-risk.md`.
+
+- **Backend-only calls.** All TV requests originate from our backend / trading-engine. **Never browser-direct** — no client-side TV SDK; no client-side fetch to TV endpoints. CSP `connect-src` does NOT include `*.tradingview.com`.
+- **Response validation.** Every TV response parsed via strict Pydantic model (`extra='forbid'`); schema mismatch → reject + alert + halt strategy on N consecutive failures.
+- **Max-age check.** `generated_at` embedded at ingest (server time of successful TV response). Live-gate rejects orders if signal age > 300s.
+- **Schema fields enforced** in adapter: `RECOMMENDATION` (enum), `BUY` (int), `SELL` (int), `NEUTRAL` (int), `summary` (dict), `oscillators` (dict), `moving_averages` (dict). Anything else → log + reject.
+- **Cache** — Redis 60s per `(symbol, interval)` tuple; cache key includes provider version (`tv_v0.7`) to invalidate on lib upgrade.
+- **Throttle** — semaphore max 4 concurrent outbound TV requests; 0.8s spacing between batches.
+- **User preview rate-limit** — 6/min per-user; 60/min per-IP — defends our service against scraping.
+- **Process isolation** — TV adapter is a separate worker (`trading-engine-tv-worker`). Cannot read `broker_credentials`. Cannot read KEK. Egress allowlist: `scanner.tradingview.com`, `api.tradingview.com`, internal API only.
+- **No `eval`/`exec`/`pickle.loads`** on TV response — lint-enforced.
+- **TLS verification mandatory** — never `verify=False` against TV. Lint-enforced.
+- **Audit log** — every TV call: timestamp, symbol, interval, recommendation, latency, status_code. Retained 90d hot.
+- **TV credentials** — currently none (unofficial scraping). If we adopt **paid TradingView API**: envelope-encrypted same as MT5 broker creds (KEK pattern); restricted scope; quarterly rotation. Add as item 18 in `secrets-audit.md`.
+- **No PII to TV** — only public symbol + exchange + interval. Verified by adapter unit test.
+- **Stable User-Agent** — `User-Agent: WhyMan404-Bot/0.7 (+https://whyman404.com/contact)` — transparent good-faith.
+- **Halt-on-health-failure** — 3 consecutive health-check failures (2-min interval) → auto-halt all `tv_signal` strategies; users notified; admin alert.
+
 ## 16. Phase 2 — Live Gate Rules (added 2026-06-15)
 
 - **Per-trade re-check** of all 7 gates on every order (not cached past 30s):

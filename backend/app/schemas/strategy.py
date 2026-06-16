@@ -22,6 +22,9 @@ class StrategyPublic(BaseModel):
     version: int
     default_params: dict[str, Any]
     is_enabled: bool
+    # R5: surface external-service dependency so the UI can show the
+    # extra TV-health gate banner on the strategy detail page.
+    requires_external_service: bool = False
 
 
 class StrategyInstanceCreateRequest(BaseModel):

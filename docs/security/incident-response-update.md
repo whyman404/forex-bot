@@ -218,6 +218,104 @@
 
 ---
 
+## IR-P2-6. TradingView API Down / Degraded
+
+> Added 2026-06-16 (Phase 3a). Reads with `tradingview-integration-risk.md` Section 2.
+
+**Sev:** SEV-2 (degraded service; no financial harm if mitigations engage). SEV-1 if combined with stale-data going live.
+
+**Detect:**
+- Health-check failures: 3 consecutive 2-min health-checks on `scanner.tradingview.com` (stable symbol `EURUSD` `1h`) return non-200 or timeout.
+- Strategy-side: spike in TV-adapter HTTP errors (429, 403, 451, 5xx, ConnectionError).
+- Latency spike: TV response p99 > 10s.
+- DNS resolution failure for `scanner.tradingview.com`.
+- Adapter raises `BlankResponse` / schema-mismatch.
+
+**Contain (within 5 min):**
+1. **Auto-halt fires** — engine reads `tv_health_status = unhealthy` and blocks all `tv_signal` orders at the live-gate.
+2. **Status page banner** — "TradingView signal source unavailable; affected strategies paused. We will resume when health restored."
+3. **In-app notification** to every user with active `tv_signal` strategy: "Your TV-based strategy is paused pending data-source recovery."
+4. **Confirm scope** — only `tv_signal` strategies affected. Local-indicator strategies + manual mode unaffected.
+5. **Snapshot** TV health-check logs, recent adapter logs, network traceroute to TV.
+
+**Investigate:**
+- Is it a TV outage (their status page)? Or a TV deliberate block on our IP/UA?
+- Is it a network issue (our egress)? Verify by curl-from-staging.
+- Is it a library bug? Verify by direct `requests` call bypassing `tradingview-ta`.
+- Is it a TV ToS-driven block? (Search inbox for cease-and-desist from TradingView.)
+
+**Eradicate:**
+- If TV outage → wait it out; auto-resume when health checks green for 5 consecutive minutes.
+- If our IP blocked → reach out to TradingView; in meantime consider rotating egress IP (Cloudflare Workers / Tunnel); document attempt and outcome.
+- If C&D received → consult counsel immediately; do NOT attempt to circumvent; switch to "Plan B" (paid TV API negotiation or alt provider Phase 4).
+- If library bug → patch the adapter / pin to last-known-good version of `tradingview-ta`.
+
+**Recover:**
+- Resume `tv_signal` strategies after 5 minutes of green health checks.
+- User comm: "Service restored, your strategy will resume on next scheduled tick."
+- If outage > 24h → consider pro-rata refund for affected users' TV strategy month.
+
+**Notify:**
+- Status page (within 15 min of detection).
+- Affected users (in-app + email).
+- If C&D: counsel + Zeus + Argus immediate.
+
+**Lessons:**
+- Was the health check sensitive enough? (Maybe shorter interval for that strategy family.)
+- Did multi-TF agreement requirement help avoid trades on degraded data? (It should.)
+- Is Phase 4 (alt source / cross-check) overdue?
+
+---
+
+## IR-P2-7. TradingView Silent Wrong Data (Poisoning)
+
+> Added 2026-06-16 (Phase 3a). Reads with `tradingview-integration-risk.md` Section 2.4.
+
+**Sev:** SEV-1 if confirmed (live financial impact possible).
+
+**Detect:** (harder than IR-P2-6 — failure mode is *no error, wrong content*)
+- Reconciliation: TV signals diverge significantly from local-indicator computation on same symbol+timeframe over an extended window.
+- User reports: "I checked TV's website and the signal there was different from what the bot acted on."
+- Adapter-level cross-check (if implemented): independent recompute of summary from oscillators+MAs mismatches `RECOMMENDATION`.
+- News-event correlated abnormal signal — bot bought into a clear bearish news move.
+- External: TV publishes notice of methodology change we missed.
+
+**Contain (within 15 min):**
+1. **Pause all `tv_signal` strategies** — engine global halt for the family.
+2. **Status page**: "Investigating TradingView signal accuracy; affected strategies paused."
+3. **Per-user position assessment** — list all open positions opened from TV signals in the last [N] hours; flag for user attention.
+4. **Snapshot** recent TV responses + our local-indicator output for cross-comparison.
+
+**Investigate:**
+- Is `tradingview-ta` parsing correctly? Re-run with current upstream commit + fixture.
+- Did TV change their methodology? Check their changelog + blog + announcement.
+- Is the schema we expect still valid? Schema validation should have caught — but maybe field semantics changed without field name change.
+- Are there indicators we're not aware of being included now?
+- Is this a TV ToS-enforced behavior? (TV deliberately returning placeholder/default values for unauthorized scrapers — possible.)
+
+**Eradicate:**
+- If TV methodology change → update strategy templates; require user re-acknowledgment; may require re-baseline paper-test (re-fire TV3 gate).
+- If `tradingview-ta` parsing bug → patch library or roll forward; update SBOM.
+- If TV deliberately misleading → escalate Plan B (move off TV faster).
+- **Mitigation requirement:** Phase 4 secondary source (e.g., Yahoo Finance, alpha-vantage, polygon.io) cross-check. **Without secondary source, full mitigation is not possible.**
+
+**Recover:**
+- Affected users: per-position assessment; close gracefully, hold to natural exit, or take immediate exit based on best-for-user.
+- Compensation policy: case-by-case; founders' call; document.
+- Public post-mortem within 7 days regardless of outcome.
+
+**Notify:**
+- Status page + affected users immediately.
+- Counsel (potential liability angle).
+- TradingView (good-faith report of suspected issue, if appropriate).
+
+**Lessons:**
+- **Phase 4 cross-source is now mandatory, not nice-to-have.**
+- Was multi-TF agreement enforced? If yes, it should have reduced blast.
+- Tighten reconciliation cadence on TV vs local indicators.
+
+---
+
 ## Common Patterns Across Phase 2 Incidents
 
 - **Money + automation = SEV-1 by default.** Don't downgrade unless certain.

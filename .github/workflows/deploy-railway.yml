@@ -1,0 +1,120 @@
+# --------------------------------------------------------------------------
+# .github/workflows/deploy-railway.yml — Deploy backend services to Railway
+# --------------------------------------------------------------------------
+# Railway has its own GitHub integration that auto-deploys on push. This
+# workflow is for explicit control:
+#   - gate deploy behind ci.yml passing
+#   - deploy specific services individually
+#   - run alembic migration as a release step BEFORE the new image goes live
+#
+# Required GitHub secrets:
+#   RAILWAY_TOKEN              — Railway → Account Settings → Tokens (Account-wide)
+#   RAILWAY_PROJECT_ID         — from `railway status` after `railway link`
+#
+# Docs: https://docs.railway.app/guides/github-actions
+# --------------------------------------------------------------------------
+
+name: deploy-railway
+
+on:
+  workflow_run:
+    workflows: ["ci"]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Which Railway service to deploy"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - backend
+          - backend-email-worker
+          - backend-backtest-worker
+          - trading-engine
+
+concurrency:
+  group: deploy-railway-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  migrate:
+    name: alembic upgrade head
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: install railway cli
+        run: |
+          curl -fsSL https://railway.app/install.sh | sh
+          echo "$HOME/.railway/bin" >> $GITHUB_PATH
+
+      - name: run migrations against railway db
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+        run: |
+          railway link --project ${{ secrets.RAILWAY_PROJECT_ID }}
+          railway run --service backend alembic upgrade head
+
+  deploy:
+    name: deploy ${{ matrix.service }}
+    needs: migrate
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # When workflow_dispatch picks a specific service, this matrix is
+        # filtered by the `if:` step below. For workflow_run, all services
+        # are deployed in parallel.
+        service:
+          - backend
+          - backend-email-worker
+          - backend-backtest-worker
+          - trading-engine
+
+    steps:
+      - name: skip if not target service
+        if: ${{ inputs.service != 'all' && inputs.service != matrix.service }}
+        run: |
+          echo "skipping ${{ matrix.service }} (target: ${{ inputs.service }})"
+          exit 0
+
+      - uses: actions/checkout@v4
+
+      - name: install railway cli
+        run: |
+          curl -fsSL https://railway.app/install.sh | sh
+          echo "$HOME/.railway/bin" >> $GITHUB_PATH
+
+      - name: deploy ${{ matrix.service }}
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+        run: |
+          railway link --project $RAILWAY_PROJECT_ID
+          railway up --service ${{ matrix.service }} --detach
+          echo "Deployed ${{ matrix.service }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: post-deploy healthcheck (web services only)
+        if: ${{ matrix.service == 'backend' || matrix.service == 'trading-engine' }}
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          # Wait for new revision to register healthy
+          for i in $(seq 1 20); do
+            STATUS=$(railway status --json | jq -r '.deployments[0].status' || echo "UNKNOWN")
+            echo "attempt $i — status: $STATUS"
+            [ "$STATUS" = "SUCCESS" ] && exit 0
+            sleep 15
+          done
+          echo "::error::Service did not become healthy in 5 min"
+          exit 1

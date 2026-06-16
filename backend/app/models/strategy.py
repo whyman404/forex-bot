@@ -18,10 +18,12 @@ class Strategy(Base, TimestampMixin):
     __tablename__ = "strategies"
     __table_args__ = (
         CheckConstraint(
-            "code IN ('london_breakout','ny_killzone','ema_adx','ema_rsi','donchian','grid')",
+            "code IN ('london_breakout','ny_killzone','ema_adx','ema_rsi','donchian','grid','tv_signal')",
             name="code",
         ),
-        CheckConstraint("asset_class IN ('gold','btc')", name="asset_class"),
+        # Multi = strategy spans multiple asset classes (e.g. tv_signal trades
+        # both gold and BTC depending on configured symbols).
+        CheckConstraint("asset_class IN ('gold','btc','multi')", name="asset_class"),
         CheckConstraint("risk_rating IN ('low','medium','high')", name="risk_rating"),
     )
 
@@ -39,4 +41,9 @@ class Strategy(Base, TimestampMixin):
     risk_rating: Mapped[str] = mapped_column(String(8), nullable=False)
     is_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true")
+    )
+    # R5: tv_signal (and any future signal-source strategy) needs the engine's
+    # TV upstream healthy before going live. Added in migration 0005.
+    requires_external_service: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
     )

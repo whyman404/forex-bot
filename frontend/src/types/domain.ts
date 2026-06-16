@@ -358,6 +358,86 @@ export interface InstanceTrade {
 }
 
 // -----------------------------------------------------------------------------
+// TradingView Signal Strategy (tv_signal) — Round 5
+// -----------------------------------------------------------------------------
+
+/**
+ * Recommendation tier reported by TradingView's technical-analysis widget.
+ * STRONG_BUY..STRONG_SELL maps to a composite score range -100..+100.
+ */
+export type TVRecommendation =
+  | "STRONG_BUY"
+  | "BUY"
+  | "NEUTRAL"
+  | "SELL"
+  | "STRONG_SELL";
+
+/**
+ * Per-timeframe analysis row returned from /tv/preview.
+ * Field names mirror backend openapi schema `TVTimeframeAnalysis`.
+ */
+export interface TVTimeframeAnalysis {
+  interval: string; // "5m" | "15m" | "1h" | "4h" | "1d" (free-form to allow more)
+  recommendation: TVRecommendation;
+  buy_count: number;
+  sell_count: number;
+  neutral_count: number;
+}
+
+/**
+ * Aggregate TV preview snapshot — multi-TF + composite score.
+ * Field names mirror backend openapi schema `TVPreview`.
+ */
+export interface TVPreview {
+  symbol: string;
+  /** TradingView exchange (e.g. OANDA, BINANCE). */
+  exchange: string;
+  /** Normalized signal score in [-100, +100]. */
+  score: number;
+  /** Confidence in [0.0, 1.0] based on cross-TF agreement. */
+  confidence: number;
+  timeframes: TVTimeframeAnalysis[];
+  /** ISO-8601 timestamp from the engine (UTC). */
+  generated_at: string;
+}
+
+/** Request body for POST /tv/preview. */
+export interface TVPreviewRequest {
+  symbol: string;
+  exchange?: string | null;
+  intervals: string[];
+}
+
+/**
+ * Symbol metadata from GET /tv/symbols.
+ * Field names mirror backend openapi schema `TVSymbol`.
+ */
+export interface TVSymbol {
+  /** Internal symbol code (e.g. 'XAUUSD'). */
+  code: string;
+  /** TV ticker — may differ from code for indices. */
+  tv_symbol: string;
+  /** TV exchange code (e.g. OANDA, BINANCE). */
+  tv_exchange: string;
+  asset_class: "gold" | "forex" | "crypto" | "index" | string;
+  display_name?: string;
+}
+
+/**
+ * GET /tv/health response — used by the live-trading modal as an extra gate
+ * before allowing tv_signal instances to go live.
+ * Field names mirror backend openapi schema `TVHealth`.
+ */
+export interface TVHealth {
+  status: "ok" | "degraded" | "down";
+  trading_engine_reachable: boolean;
+  upstream_tv_reachable?: boolean | null;
+  reason?: string | null;
+  /** ISO-8601 UTC timestamp. */
+  checked_at: string;
+}
+
+// -----------------------------------------------------------------------------
 // Onboarding
 // -----------------------------------------------------------------------------
 

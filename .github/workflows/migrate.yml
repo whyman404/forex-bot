@@ -1,0 +1,95 @@
+# ============================================================================
+# .github/workflows/migrate.yml
+# ============================================================================
+# Runs alembic migrations against staging or prod.
+# Never bundled with app deploy — migrations are reviewable + roll-forward only.
+# ============================================================================
+
+name: migrate
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "staging"
+        type: choice
+        options: [staging, production]
+      target:
+        description: "Alembic revision (default: head)"
+        required: false
+        default: "head"
+        type: string
+      dry_run:
+        description: "Dry run (show SQL only)"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: migrate-${{ inputs.environment }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ inputs.environment == 'production' && secrets.PROD_SSH_KEY || secrets.STAGING_SSH_KEY }}
+
+      - name: Determine host
+        id: host
+        run: |
+          if [ "${{ inputs.environment }}" = "production" ]; then
+            echo "host=${{ secrets.PROD_HOST }}" >> $GITHUB_OUTPUT
+          else
+            echo "host=${{ secrets.STAGING_HOST }}" >> $GITHUB_OUTPUT
+          fi
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "$(grep host $GITHUB_OUTPUT | cut -d= -f2)" >> ~/.ssh/known_hosts
+
+      - name: Backup DB first (prod only)
+        if: ${{ inputs.environment == 'production' }}
+        run: |
+          ssh deploy@${{ steps.host.outputs.host }} bash -s <<'EOSSH'
+            set -euxo pipefail
+            cd /opt/forex-bot
+            STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+            docker compose exec -T postgres pg_dump -U forex -Fc forex_bot > /data/backups/pre-migrate-${STAMP}.dump
+          EOSSH
+
+      - name: Dry run (SQL preview)
+        if: ${{ inputs.dry_run }}
+        run: |
+          ssh deploy@${{ steps.host.outputs.host }} bash -s <<EOSSH
+            set -euxo pipefail
+            cd /opt/forex-bot
+            docker compose run --rm backend alembic upgrade ${{ inputs.target }} --sql
+          EOSSH
+
+      - name: Run migration
+        if: ${{ !inputs.dry_run }}
+        run: |
+          ssh deploy@${{ steps.host.outputs.host }} bash -s <<EOSSH
+            set -euxo pipefail
+            cd /opt/forex-bot
+            docker compose run --rm backend alembic upgrade ${{ inputs.target }}
+            docker compose run --rm backend alembic current
+          EOSSH
+
+      - name: Notify
+        if: always()
+        run: |
+          curl -fsS -X POST -H "Content-Type: application/json" \
+            -d "{\"content\":\"migrate ${{ inputs.environment }} → ${{ inputs.target }}: ${{ job.status }} (dry_run=${{ inputs.dry_run }})\"}" \
+            ${{ secrets.DISCORD_WEBHOOK }} || true

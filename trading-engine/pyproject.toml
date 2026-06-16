@@ -37,6 +37,12 @@ dependencies = [
     # HTTP / async
     "httpx>=0.27.0",
     "tenacity>=8.4.0",
+
+    # TradingView signals (primary — used by tv_signal strategy).
+    # The PyPI library `tradingview-ta` returns LIVE recommendations only;
+    # our `tradingview/client.py` wraps it with retry + cache + throttle.
+    # If unavailable, TV_ENABLED=false disables the strategy gracefully.
+    "tradingview-ta>=3.3.0",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +54,14 @@ mt5 = [
 # TA-Lib (C library). Install only if you have the system library installed.
 talib = [
     "TA-Lib>=0.4.28",
+]
+
+# Optional — install the full tradingview-mcp server (PyPI). We do NOT
+# run it as MCP server inside our backend (only its underlying lib is
+# imported directly via `tradingview-ta`). Kept here so an ops user can
+# install the bundle for parity with the upstream documentation.
+tv = [
+    "tradingview-mcp-server>=0.7.0",
 ]
 
 # Development tooling
@@ -71,6 +85,7 @@ packages = [
     "broker",
     "risk",
     "data",
+    "tradingview",
 ]
 
 [tool.uv]

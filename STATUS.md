@@ -1,10 +1,11 @@
 # Forex Bot — Honest Status
 
-> Last review: 2026-06-15 (Hephaestus Takumi, Phase 2.5 hybrid-deploy review)
+> Last review: 2026-06-16 (Hephaestus Takumi, Phase 3 TradingView integration review)
 > Audience: project sponsor + first prod operator
 > Previous: see `docs/project/integration-review.md` (Phase 1),
-> `docs/project/integration-review-phase2.md` (Phase 2), and
-> `docs/project/integration-review-phase2.5.md` (this round).
+> `docs/project/integration-review-phase2.md` (Phase 2),
+> `docs/project/integration-review-phase2.5.md` (Phase 2.5), and
+> `docs/project/integration-review-phase3.md` (this round).
 
 ## Deploy targets supported
 
@@ -63,6 +64,19 @@
 | Deploy / rollback scripts | OK | `infra/scripts/deploy.sh`, `rollback.sh`. |
 | Secrets rotation runbook | OK | `infra/scripts/rotate-secrets.sh`. |
 | GitHub Actions: deploy-release.yml | OK | image build + push + ssh-deploy. |
+
+### Phase 3 (TradingView Signal Follow — paper-only by default)
+
+| Capability | Status | Notes |
+|---|---|---|
+| TradingView Signal Follow strategy (7th) | OK | `tv_signal` — multi-TF consensus via `tradingview-ta`. Halts (does not trade blindly) if TV unreachable. |
+| Engine `/tv/preview` + `/tv/symbols` + `/tv/health` | OK | Live probe to `EURUSD/OANDA/1h`; cached 60 s by TVClient. |
+| Backend `/api/v1/tv/preview|symbols|health` | OK | Thin proxies; HMAC-signed via `sign_canonical`; per-user (10rpm) + per-tier rate limits. |
+| Migration `0005_tv_signal` | OK | Idempotent + downgradable; widens `asset_class` enum (+ `multi`), adds `strategies.requires_external_service` and `strategy_instances.external_signal_provider`. |
+| Live-gate `external_service_healthy` | OK | `tv_signal` instances require TV health `ok` or `degraded`; `down` blocks live start. |
+| Frontend strategy detail + score bar + TF table | OK | `/strategies/tv_signal`; auto-refresh preview 60 s; health polled 30 s. |
+| Risk disclaimer v1.1.0 (TV liability addendum) | OK | "Signals are informational, not financial advice"; consent re-prompts on bump. |
+| Argus Section TV launch checklist (14 gates) | OK | Must be signed off before flipping any tv_signal instance live. Paper-only by default. |
 
 ## What is Stub / Mock
 

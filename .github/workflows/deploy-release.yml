@@ -1,0 +1,319 @@
+# ============================================================================
+# .github/workflows/deploy-release.yml — Tag-triggered release deploy
+# ============================================================================
+# Owner: Hestia Kaoru
+# Last updated: 2026-06-15
+#
+# Trigger: push of a git tag matching v* (e.g. v0.2.1, v1.0.0-rc1)
+#
+# Flow:
+#   1. Run full test suite (gate)
+#   2. Build images, push to GHCR with both tag and "release" floating label
+#   3. Auto-deploy to STAGING and wait for green smoke
+#   4. Require MANUAL approval (GitHub Environment) before PROD
+#   5. Deploy to production, smoke, auto-rollback on failure
+#   6. Notify Slack on any state change
+#
+# Required env secrets (configured per GitHub Environment):
+#   STAGING:    STG_SSH_HOST, STG_SSH_USER, STG_SSH_KEY, STG_SSH_PORT
+#   PRODUCTION: PROD_SSH_HOST, PROD_SSH_USER, PROD_SSH_KEY, PROD_SSH_PORT
+#   COMMON:     SLACK_WEBHOOK_URL, GHCR_TOKEN
+# ============================================================================
+
+name: deploy-release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: deploy-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: ${{ github.repository_owner }}/forex-bot
+
+jobs:
+
+  # --------------------------------------------------------------------------
+  # 1) Test gate
+  # --------------------------------------------------------------------------
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: backend deps
+        working-directory: backend
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: backend tests
+        working-directory: backend
+        run: pytest -q --cov=app --cov-fail-under=70
+
+      - name: frontend deps
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: frontend tests + typecheck
+        working-directory: frontend
+        run: |
+          pnpm typecheck
+          pnpm test --run
+
+      - name: engine deps
+        working-directory: trading-engine
+        run: pip install -r requirements.txt
+
+      - name: engine tests
+        working-directory: trading-engine
+        run: pytest -q
+
+  # --------------------------------------------------------------------------
+  # 2) Build & push to GHCR
+  # --------------------------------------------------------------------------
+  build:
+    name: build & push
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: test
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      sha: ${{ steps.meta.outputs.sha }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: derive tag
+        id: meta
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Release tag: ${TAG}"
+
+      - name: setup buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: login to ghcr
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: backend
+        uses: docker/build-push-action@v5
+        with:
+          context: backend
+          file: backend/Dockerfile
+          target: runtime
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/backend:${{ steps.meta.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/backend:release
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/backend:sha-${{ steps.meta.outputs.sha }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.tag }}
+
+      - name: frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/frontend:${{ steps.meta.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/frontend:release
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/frontend:sha-${{ steps.meta.outputs.sha }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+      - name: trading-engine
+        uses: docker/build-push-action@v5
+        with:
+          context: trading-engine
+          file: trading-engine/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/trading-engine:${{ steps.meta.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/trading-engine:release
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/trading-engine:sha-${{ steps.meta.outputs.sha }}
+          cache-from: type=gha,scope=engine
+          cache-to: type=gha,mode=max,scope=engine
+
+      - name: caddy
+        uses: docker/build-push-action@v5
+        with:
+          context: infra/caddy
+          file: infra/caddy/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/caddy:${{ steps.meta.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/caddy:release
+          cache-from: type=gha,scope=caddy
+          cache-to: type=gha,mode=max,scope=caddy
+
+  # --------------------------------------------------------------------------
+  # 3) Deploy to staging (auto)
+  # --------------------------------------------------------------------------
+  deploy-staging:
+    name: deploy → staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: build
+    environment:
+      name: staging
+      url: https://staging.forexbot.example.com
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup ssh
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s' "${{ secrets.STG_SSH_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -p "${{ secrets.STG_SSH_PORT || '22' }}" "${{ secrets.STG_SSH_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: deploy
+        env:
+          HOST: ${{ secrets.STG_SSH_HOST }}
+          USER: ${{ secrets.STG_SSH_USER }}
+          PORT: ${{ secrets.STG_SSH_PORT || '22' }}
+          IMAGE_TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          ssh -i ~/.ssh/id_deploy -p "$PORT" "$USER@$HOST" bash -s <<'REMOTE'
+          set -euo pipefail
+          cd /srv/forex-bot
+          git fetch --tags && git checkout "${IMAGE_TAG}"
+          sed -i.bak "s/^IMAGE_TAG=.*/IMAGE_TAG=${IMAGE_TAG}/" .env.staging || echo "IMAGE_TAG=${IMAGE_TAG}" >> .env.staging
+          docker compose --env-file .env.staging -f infra/docker-compose.yml -f infra/docker-compose.prod.yml pull
+          docker compose --env-file .env.staging -f infra/docker-compose.yml -f infra/docker-compose.prod.yml run --rm backend alembic upgrade head
+          docker compose --env-file .env.staging -f infra/docker-compose.yml -f infra/docker-compose.prod.yml up -d --remove-orphans --wait --wait-timeout 180
+          ./scripts/smoke.sh --base-url https://staging.api.forexbot.example.com
+          REMOTE
+
+      - name: cleanup
+        if: always()
+        run: rm -f ~/.ssh/id_deploy
+
+  # --------------------------------------------------------------------------
+  # 4) Deploy to production (manual approval via Environment)
+  # --------------------------------------------------------------------------
+  deploy-production:
+    name: deploy → production
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [build, deploy-staging]
+    environment:
+      name: production            # configure required reviewers here
+      url: https://forexbot.example.com
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup ssh
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s' "${{ secrets.PROD_SSH_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -p "${{ secrets.PROD_SSH_PORT || '22' }}" "${{ secrets.PROD_SSH_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: deploy with auto-rollback
+        env:
+          HOST: ${{ secrets.PROD_SSH_HOST }}
+          USER: ${{ secrets.PROD_SSH_USER }}
+          PORT: ${{ secrets.PROD_SSH_PORT || '22' }}
+          IMAGE_TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          ssh -i ~/.ssh/id_deploy -p "$PORT" "$USER@$HOST" bash -s <<'REMOTE'
+          set -euo pipefail
+          cd /srv/forex-bot
+          PREV=$(cat .deploy-current 2>/dev/null || echo none)
+          echo "previous=$PREV"
+
+          git fetch --tags && git checkout "${IMAGE_TAG}"
+          cp .env.production .env.production.bak.$(date +%s)
+          sed -i.bak "s/^IMAGE_TAG=.*/IMAGE_TAG=${IMAGE_TAG}/" .env.production || echo "IMAGE_TAG=${IMAGE_TAG}" >> .env.production
+          docker compose --env-file .env.production -f infra/docker-compose.yml -f infra/docker-compose.prod.yml pull
+          docker compose --env-file .env.production -f infra/docker-compose.yml -f infra/docker-compose.prod.yml run --rm backend alembic upgrade head
+          docker compose --env-file .env.production -f infra/docker-compose.yml -f infra/docker-compose.prod.yml up -d --remove-orphans --wait --wait-timeout 240
+
+          if ! ./scripts/smoke.sh --base-url https://api.forexbot.example.com; then
+              echo "SMOKE FAILED — rolling back to $PREV"
+              if [ "$PREV" != "none" ]; then
+                  git checkout "$PREV"
+                  sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=${PREV}/" .env.production
+                  docker compose --env-file .env.production -f infra/docker-compose.yml -f infra/docker-compose.prod.yml pull
+                  docker compose --env-file .env.production -f infra/docker-compose.yml -f infra/docker-compose.prod.yml up -d --wait
+              fi
+              exit 1
+          fi
+          echo "${IMAGE_TAG}" > .deploy-current
+          echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ${IMAGE_TAG}" >> .deploy-log
+          REMOTE
+
+      - name: cleanup
+        if: always()
+        run: rm -f ~/.ssh/id_deploy
+
+  # --------------------------------------------------------------------------
+  # 5) Notify Slack
+  # --------------------------------------------------------------------------
+  notify:
+    name: notify
+    runs-on: ubuntu-latest
+    needs: [build, deploy-staging, deploy-production]
+    if: always()
+    steps:
+      - name: post to slack
+        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
+        run: |
+          STG_STATE="${{ needs.deploy-staging.result }}"
+          PROD_STATE="${{ needs.deploy-production.result }}"
+          OVERALL="success"
+          [[ "$STG_STATE" != "success" || "$PROD_STATE" != "success" ]] && OVERALL="failure"
+          COLOR=good
+          [[ "$OVERALL" == "failure" ]] && COLOR=danger
+
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            --data "{
+              \"attachments\":[{
+                \"color\":\"$COLOR\",
+                \"title\":\"Release ${{ needs.build.outputs.tag }} — $OVERALL\",
+                \"text\":\"staging: $STG_STATE\\nproduction: $PROD_STATE\\nactor: ${{ github.actor }}\",
+                \"actions\":[{\"type\":\"button\",\"text\":\"View run\",\"url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}]
+              }]
+            }" \
+            "${{ secrets.SLACK_WEBHOOK_URL }}" >/dev/null

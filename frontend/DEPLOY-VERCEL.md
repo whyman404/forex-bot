@@ -38,6 +38,34 @@ Vercel auto-injects these — **never set them yourself**:
 
 ---
 
+## TradingView Signal strategy (`tv_signal`)
+
+Round 5 introduces the 7th strategy — TradingView Signal Follow. It depends on
+three backend endpoints exposed under `NEXT_PUBLIC_API_URL`:
+
+| Endpoint              | Method | Purpose                                  |
+| --------------------- | ------ | ---------------------------------------- |
+| `/tv/symbols`         | GET    | List supported TV-mapped symbols         |
+| `/tv/preview`         | POST   | Multi-timeframe consensus snapshot       |
+| `/tv/health`          | GET    | Integration health (polled every 30s)    |
+
+For full functionality the backend must run with `TV_ENABLED=true`. When the
+flag is `false` (or the endpoint returns HTTP 503), the frontend **gracefully
+degrades**:
+
+- The strategies grid still renders the 7th card with the "Informational
+  signals — not financial advice" chip.
+- The `/strategies/tv_signal` detail page renders a non-blocking warning banner
+  and disables the **Preview** button.
+- The live-trading modal's extra TV gate fails closed — users with `tv_signal`
+  instances cannot go live until the backend recovers.
+
+No additional Vercel env vars are required for the frontend — all behavior is
+driven by the backend's `TV_ENABLED` flag and standard graceful-degradation
+patterns in `use-tradingview.ts`.
+
+---
+
 ## Region selection
 
 `vercel.json` pins to `["sin1", "iad1"]`:

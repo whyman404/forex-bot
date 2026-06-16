@@ -1,0 +1,130 @@
+# ============================================================================
+# .github/workflows/deploy-prod.yml
+# ============================================================================
+# Triggered manually OR by pushing a tag like `release/2026-06-14`.
+# Requires manual approval via GitHub Environment `production`.
+# Strategy: rolling, start-first, with healthcheck + smoke test + auto-rollback.
+# ============================================================================
+
+name: deploy-prod
+
+on:
+  push:
+    tags: ["release/*"]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Tag to deploy (must already exist in GHCR)"
+        required: true
+        type: string
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://app.forex-bot.app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Friday check
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          DAY=$(date -u +%u) # 1=Mon ... 7=Sun
+          HOUR=$(date -u +%H)
+          if [ "$DAY" = "5" ] && [ "$HOUR" -ge "13" ]; then
+            echo "::error::Friday after 13:00 UTC. Override by adding '[force-friday]' to commit message."
+            COMMIT_MSG=$(git log -1 --pretty=%B)
+            if [[ "$COMMIT_MSG" != *"[force-friday]"* ]]; then
+              exit 1
+            fi
+          fi
+
+      - name: Compute image tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.image_tag }}" ]; then
+            echo "tag=${{ inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            REL=${GITHUB_REF#refs/tags/release/}
+            echo "tag=${REL}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.PROD_SSH_KEY }}
+
+      - name: Add host to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.PROD_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Capture previous tag for rollback
+        id: prev
+        run: |
+          PREV=$(ssh deploy@${{ secrets.PROD_HOST }} 'cd /opt/forex-bot && cat .last-deploy-tag 2>/dev/null || echo none')
+          echo "prev=${PREV}" >> $GITHUB_OUTPUT
+
+      - name: Deploy
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          ssh deploy@${{ secrets.PROD_HOST }} bash -s <<EOSSH
+            set -euxo pipefail
+            cd /opt/forex-bot
+            git fetch --depth=1 origin
+            git checkout ${{ github.sha }}
+            export IMAGE_TAG="${IMAGE_TAG}"
+            echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans
+            echo "${IMAGE_TAG}" > .last-deploy-tag
+          EOSSH
+
+      - name: Smoke test
+        id: smoke
+        run: |
+          set +e
+          OK=0
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -fsS https://api.forex-bot.app/healthz \
+                 && curl -fsS https://api.forex-bot.app/readyz \
+                 && curl -fsS https://app.forex-bot.app/api/health; then
+              OK=1
+              break
+            fi
+            sleep 6
+          done
+          if [ "$OK" != "1" ]; then
+            echo "SMOKE_FAILED=1" >> $GITHUB_ENV
+            exit 1
+          fi
+
+      - name: Auto-rollback on smoke failure
+        if: failure() && steps.smoke.outcome == 'failure' && steps.prev.outputs.prev != 'none'
+        env:
+          PREV_TAG: ${{ steps.prev.outputs.prev }}
+        run: |
+          ssh deploy@${{ secrets.PROD_HOST }} bash -s <<EOSSH
+            set -euxo pipefail
+            cd /opt/forex-bot
+            export IMAGE_TAG="${PREV_TAG}"
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans
+            echo "${PREV_TAG}" > .last-deploy-tag
+          EOSSH
+
+      - name: Notify Discord
+        if: always()
+        run: |
+          curl -fsS -X POST -H "Content-Type: application/json" \
+            -d "{\"content\":\"PROD deploy: ${{ job.status }} | tag=${{ steps.tag.outputs.tag }} | sha=${{ github.sha }}\"}" \
+            ${{ secrets.DISCORD_WEBHOOK }} || true

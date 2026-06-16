@@ -151,6 +151,23 @@
 - **Blast radius:** **Catastrophic.** Full compromise of all admin services. Mitigation: hardware key 2FA on the password manager itself; family / emergency recovery flow set up.
 - **Detection:** vault audit log; impossible-travel sign-in alerts; sign-in from new device email.
 
+### 1.16b TradingView API (NOT YET ACTIVE — placeholder for future paid API)
+
+> Added 2026-06-16 in connection with Phase 3a TradingView integration.
+
+**Current state:** `tradingview-ta` uses **no API key** — it queries TradingView's public scanner endpoint without authentication. **No secret to manage today.** This entry is a placeholder for when we adopt the official paid TradingView API (TV Charting / TV business plan with API access).
+
+When activated:
+- **Where used:** trading-engine (TV adapter — read-only signal queries).
+- **Source:** TradingView business dashboard → API token; restricted scope (read-only on scanner endpoints, no chart-edit, no user-data scopes).
+- **Owner:** Argus + Kairos + Zeus (commercial).
+- **Rotation:** quarterly + on incident.
+- **Storage:** envelope-encrypted same as MT5 broker credentials (KEK pattern); never plain in env file on disk.
+- **Blast radius:** low-medium. Read-only on public market data. Worst case = attacker uses our token to abuse rate limit → we get rate-limited / suspended by TV. No financial-system access; no PII access.
+- **Detection:** TV business dashboard usage anomaly; alert if usage from unexpected IP.
+
+🟡 Not in Phase 3a launch scope. If we move to paid API → add row 18 to summary table + Section 4 rotation calendar.
+
 ### 1.17 Domain registrar password + 2FA
 - **Where used:** founder.
 - **Source:** registrar; ideally hardware key 2FA + registry lock.

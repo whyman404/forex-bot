@@ -103,6 +103,45 @@ class TestMT5Response(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# TradingView preview schemas (R4)
+# ---------------------------------------------------------------------------
+class TVPreviewRequest(BaseModel):
+    symbol: str = Field(..., examples=["XAUUSD"])
+    exchange: str | None = Field(default=None, examples=["OANDA"])
+    intervals: list[str] | None = Field(
+        default=None, examples=[["15m", "1h", "4h"]]
+    )
+    screener: str | None = Field(default=None, examples=["forex"])
+
+
+class TVPreviewResponse(BaseModel):
+    """Engine-side preview response.
+
+    The shape is dual-mode so both backend (Atlas) and direct CLI/dev callers
+    are happy:
+      - Backend (`TradingViewService._normalize_preview`) reads top-level
+        ``score`` (float), ``confidence`` (float), ``timeframes`` (list),
+        ``generated_at`` (ISO string).
+      - Direct/dev callers can still inspect ``analysis.per_interval`` and
+        ``score_detail`` for the rich object form.
+    """
+
+    ok: bool
+    symbol: str
+    exchange: str
+    intervals: list[str]
+    analysis: dict[str, Any] | None = None
+    # Backend-facing flat fields (R5 contract with Atlas)
+    score: float = 0.0
+    confidence: float = 0.0
+    timeframes: list[dict[str, Any]] = Field(default_factory=list)
+    generated_at: str | None = None
+    # Rich object form (legacy/dev callers)
+    score_detail: dict[str, Any] | None = None
+    error: str | None = None
+
+
+# ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
 @app.get("/healthz")
@@ -269,3 +308,191 @@ def test_mt5_connection(req: TestMT5Request) -> TestMT5Response:
             message="MT5 connect failed",
             error=str(e),
         )
+
+
+# ---------------------------------------------------------------------------
+# TradingView preview endpoints (R4)
+# ---------------------------------------------------------------------------
+@app.post("/tv/preview", response_model=TVPreviewResponse)
+def tv_preview(req: TVPreviewRequest) -> TVPreviewResponse:
+    """Return TV multi-TF analysis for a (symbol, exchange) for UI preview.
+
+    Cached for 60s by the TVClient itself (no additional cache here).
+    If TV is disabled or unreachable, returns ok=false with error string
+    — the UI surfaces this as a warning, NOT an error toast.
+    """
+    try:
+        from tradingview.client import TVClient, tv_enabled, tv_unavailable_reason
+        from tradingview.scorer import Scorer
+        from tradingview.symbols import resolve_symbol
+    except ImportError as e:
+        return TVPreviewResponse(
+            ok=False,
+            symbol=req.symbol,
+            exchange=req.exchange or "",
+            intervals=req.intervals or [],
+            error=f"tv_module_missing: {e}",
+        )
+
+    if not tv_enabled():
+        return TVPreviewResponse(
+            ok=False,
+            symbol=req.symbol,
+            exchange=req.exchange or "",
+            intervals=req.intervals or [],
+            error=tv_unavailable_reason(),
+        )
+
+    resolved = resolve_symbol(req.symbol, req.exchange)
+    intervals = req.intervals or ["15m", "1h", "4h"]
+    screener_map = {"forex": "forex", "gold": "forex", "crypto": "crypto"}
+    screener = req.screener or screener_map.get(resolved.asset_class, "forex")
+
+    try:
+        client = TVClient()
+        scorer = Scorer()
+        analyses = []
+        per_tf_errors: list[dict[str, str]] = []
+        for iv in intervals:
+            try:
+                analyses.append(
+                    client.get_analysis(
+                        resolved.symbol,
+                        resolved.exchange,
+                        iv,
+                        screener=screener,
+                    )
+                )
+            except Exception as e:
+                per_tf_errors.append({"interval": iv, "error": str(e)[:200]})
+        if not analyses:
+            return TVPreviewResponse(
+                ok=False,
+                symbol=resolved.symbol,
+                exchange=resolved.exchange,
+                intervals=intervals,
+                error=(
+                    "all_intervals_failed: "
+                    + "; ".join(f"{x['interval']}={x['error']}" for x in per_tf_errors)
+                ),
+            )
+        combined = scorer.score(analyses)
+        # Flat per-tf list keyed for backend.app.schemas.tradingview.TVTimeframeAnalysis.
+        flat_timeframes = [
+            {
+                "interval": a.interval,
+                "recommendation": a.recommendation,
+                "buy_count": a.buy_signals,
+                "sell_count": a.sell_signals,
+                "neutral_count": a.neutral_signals,
+            }
+            for a in analyses
+        ]
+        from datetime import datetime, timezone
+
+        return TVPreviewResponse(
+            ok=True,
+            symbol=resolved.symbol,
+            exchange=resolved.exchange,
+            intervals=intervals,
+            analysis={
+                "per_interval": [a.to_dict() for a in analyses],
+                "errors": per_tf_errors,
+            },
+            # Backend-facing flat fields:
+            score=float(combined.score),
+            confidence=float(combined.confidence),
+            timeframes=flat_timeframes,
+            generated_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            # Legacy/rich form preserved:
+            score_detail=combined.to_dict(),
+        )
+    except Exception as e:
+        return TVPreviewResponse(
+            ok=False,
+            symbol=resolved.symbol,
+            exchange=resolved.exchange,
+            intervals=intervals,
+            error=str(e)[:200],
+        )
+
+
+@app.get("/tv/symbols")
+def tv_symbols() -> dict[str, Any]:
+    """List supported symbols + their TV (symbol, exchange) mapping."""
+    try:
+        from tradingview.client import tv_enabled, tv_unavailable_reason
+        from tradingview.symbols import list_supported
+
+        return {
+            "tv_enabled": tv_enabled(),
+            "tv_unavailable_reason": tv_unavailable_reason() or None,
+            "symbols": list_supported(),
+        }
+    except ImportError as e:
+        return {"tv_enabled": False, "tv_unavailable_reason": str(e), "symbols": []}
+
+
+@app.get("/tv/health")
+def tv_health() -> dict[str, Any]:
+    """Engine-side health probe — feeds backend's live-gate `external_service_healthy`.
+
+    Contract (matches `backend.app.schemas.tradingview.TVHealth`):
+      - status: "ok" | "degraded" | "down"
+      - trading_engine_reachable: bool   (always True if we respond)
+      - upstream_tv_reachable: bool | None
+      - reason: str | None
+      - checked_at: ISO-8601
+
+    Behavior:
+      - If `tradingview-ta` lib missing or TV_ENABLED=false → status="down".
+      - Otherwise we attempt a tiny probe call (EURUSD/OANDA/1h). Success →
+        status="ok". Any exception → status="degraded" + reason. The probe
+        is deliberately cheap; the 60s TVClient cache makes repeated calls
+        a no-op.
+    """
+    from datetime import datetime, timezone
+
+    now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    try:
+        from tradingview.client import (
+            TVClient,
+            tv_enabled,
+            tv_unavailable_reason,
+        )
+    except ImportError as e:
+        return {
+            "status": "down",
+            "trading_engine_reachable": True,
+            "upstream_tv_reachable": None,
+            "reason": f"tv_module_import_failed: {e}",
+            "checked_at": now_iso,
+        }
+
+    if not tv_enabled():
+        return {
+            "status": "down",
+            "trading_engine_reachable": True,
+            "upstream_tv_reachable": False,
+            "reason": tv_unavailable_reason() or "TV disabled",
+            "checked_at": now_iso,
+        }
+
+    # Live probe — cached for 60s by TVClient itself.
+    try:
+        TVClient().get_analysis("EURUSD", "OANDA", "1h", screener="forex")
+        return {
+            "status": "ok",
+            "trading_engine_reachable": True,
+            "upstream_tv_reachable": True,
+            "reason": None,
+            "checked_at": now_iso,
+        }
+    except Exception as e:  # noqa: BLE001 — health endpoint must never raise
+        return {
+            "status": "degraded",
+            "trading_engine_reachable": True,
+            "upstream_tv_reachable": False,
+            "reason": f"probe_failed: {str(e)[:200]}",
+            "checked_at": now_iso,
+        }

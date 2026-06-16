@@ -37,6 +37,7 @@ import {
   useRevertToPaper,
 } from "@/hooks/use-live-trading";
 import { useKillInstance } from "@/hooks/use-kill-switch";
+import { useTVHealth } from "@/hooks/use-tradingview";
 import { ApiError } from "@/lib/api";
 import { t } from "@/lib/i18n";
 
@@ -285,6 +286,7 @@ export default function StrategyDetailPage({
                     onOpenChange={setLiveModalOpen}
                     instanceId={matchingInstance.id}
                     instanceLabel={matchingInstance.label}
+                    strategyCode={code}
                   />
                 </>
               )
@@ -305,6 +307,7 @@ export default function StrategyDetailPage({
             <LiveMonitoringTab
               instanceId={matchingInstance.id}
               isLive={matchingInstanceIsLive}
+              strategyCode={code}
             />
           </TabsContent>
         )}
@@ -360,13 +363,16 @@ function RevertButtonWithModal({
 function LiveMonitoringTab({
   instanceId,
   isLive,
+  strategyCode,
 }: {
   instanceId: string;
   isLive: boolean;
+  strategyCode: string;
 }): React.ReactElement {
   const health = useInstanceHealth(instanceId);
   const signals = useInstanceSignals(instanceId);
   const trades = useInstanceTrades(instanceId);
+  const tvHealth = useTVHealth({ enabled: strategyCode === "tv_signal" });
   const kill = useKillInstance();
   const [confirmKill, setConfirmKill] = React.useState(false);
 
@@ -389,8 +395,108 @@ function LiveMonitoringTab({
   const status = health.data?.status ?? "unknown";
   const pnl = health.data?.today_pnl ?? 0;
 
+  const isTVSignal = strategyCode === "tv_signal";
+  const tvLastCheck = tvHealth.data?.checked_at
+    ? new Date(tvHealth.data.checked_at).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : "—";
+  const tvUpstreamLabel =
+    tvHealth.data?.upstream_tv_reachable === true
+      ? "Reachable"
+      : tvHealth.data?.upstream_tv_reachable === false
+        ? "Down"
+        : "Unknown";
+
   return (
     <div className="space-y-4">
+      {isTVSignal && (
+        <Card>
+          <CardHeader>
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <CardTitle className="text-base">TradingView integration</CardTitle>
+                <CardDescription>
+                  Live signal feed status. Polls every 30 seconds.
+                </CardDescription>
+              </div>
+              <Badge
+                variant={
+                  tvHealth.data?.status === "ok"
+                    ? "profit"
+                    : tvHealth.data?.status === "degraded"
+                      ? "warn"
+                      : tvHealth.data?.status === "down"
+                        ? "destructive"
+                        : "outline"
+                }
+              >
+                {tvHealth.isLoading
+                  ? "Checking…"
+                  : (tvHealth.data?.status ?? "unknown").toUpperCase()}
+              </Badge>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+              <Metric label="Last TV check" value={tvLastCheck} />
+              <Metric label="Upstream TV" value={tvUpstreamLabel} />
+              <Metric
+                label="Mode"
+                value={isLive ? "LIVE" : "Paper"}
+                tone={isLive ? "warn" : undefined}
+              />
+              <Metric
+                label="Source"
+                value="TradingView"
+              />
+            </div>
+            <div className="mt-4">
+              <h4 className="text-sm font-semibold">Recent TV signals received</h4>
+              <p className="text-xs text-muted-foreground">
+                Last 5 signals routed to this instance.
+              </p>
+              {signals.isLoading ? (
+                <div className="mt-2">
+                  <Skeleton className="h-24" />
+                </div>
+              ) : !signals.data || signals.data.length === 0 ? (
+                <p className="mt-2 rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+                  No TradingView signals received yet.
+                </p>
+              ) : (
+                <ul className="mt-2 space-y-1.5">
+                  {signals.data.slice(0, 5).map((s) => (
+                    <li
+                      key={s.id}
+                      className="flex items-center justify-between gap-2 rounded-md border px-2.5 py-1.5 text-xs"
+                    >
+                      <span className="font-mono text-muted-foreground">
+                        {new Date(s.emitted_at).toLocaleTimeString()}
+                      </span>
+                      <span className="font-medium">{s.asset}</span>
+                      <Badge variant={s.side === "buy" ? "profit" : "warn"}>
+                        {s.side.toUpperCase()}
+                      </Badge>
+                      <span className="truncate text-muted-foreground" title={s.reason ?? ""}>
+                        {s.reason ?? "—"}
+                      </span>
+                      <span className="font-medium">
+                        {s.acted_on ? "Routed" : "Filtered"}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <p className="mt-3 text-[11px] text-muted-foreground">
+              Signals from TradingView are informational only — see Risk Disclosure.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
       <Card>
         <CardHeader>
           <div className="flex flex-wrap items-start justify-between gap-3">

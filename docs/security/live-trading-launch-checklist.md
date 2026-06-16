@@ -73,7 +73,7 @@
 
 ---
 
-## Section L — Live Gate (7-Check Logic)
+## Section L — Live Gate (7-Check Logic + TV extension)
 
 🔴 **L1** Per-trade gate verified — engine re-checks all 7 gates before EVERY order send:
 - [ ] L1.1 `live_mode_enabled = true`
@@ -83,6 +83,7 @@
 - [ ] L1.5 `broker_connected and broker_balance >= min_required`
 - [ ] L1.6 `kyc_tier >= required_tier`
 - [ ] L1.7 `jurisdiction in allowed_set`
+- [ ] L1.8 (if strategy is `tv_signal` family) `tv_disclaimer_consent_signed.version >= current_tv_version` AND `tv_health_status == healthy` AND `signal_age <= 300s`
 🔴 **L2** Negative tests: for each of the 7 gates, force-fail it → engine blocks the order with audit + alert.
 🔴 **L3** Race test (AS-P2-8): two go-live clicks simultaneously → only one succeeds for free-tier user.
 🔴 **L4** TOCTOU test (AS-P2-12): mid-trade plan downgrade → next order blocked within 30s of state change.
@@ -216,6 +217,29 @@
 🔴 **U-Live3** Signed consent (audit-logged) acknowledging risk disclosure version.
 🔴 **U-Live4** Live mode toggle requires re-auth + email confirmation code.
 🔴 **U-Live5** Minimum default position size capped (e.g., 0.01 lot) for first 24h after enable; raised gradually with explicit user opt-in.
+
+---
+
+## Section TV — TradingView Strategy Family (Phase 3a)
+
+> Added 2026-06-16. Applies to any user enabling a `tv_signal`-family strategy in live mode. Reads with `tradingview-integration-risk.md` + `disclaimers-v2.md`.
+
+🔴 **TV1** `tv_disclaimer_consent_signed` v2 present in `audit_log` for the user — version 2 with TV-specific text. Verified by live-gate query before EVERY order in `tv_signal` family.
+🔴 **TV2** TV health check passing — `scanner.tradingview.com` queried on stable symbol (`EURUSD`, `1h`) every 2 min; auto-halt on 3 consecutive failures wired + tested.
+🔴 **TV3** `tv_strategy_min_paper_days` — strategy ran in paper mode with TV-source signals (not local-indicator signals) for at least 14 calendar days; performance baseline captured.
+🔴 **TV4** Schema validation Pydantic model deployed for TV response; CI fixture test green; schema-mismatch test → engine rejects + alerts.
+🔴 **TV5** Throttle deployed: 4 concurrent TV requests max, 0.8s spacing; load-tested at 100 simulated previews/min.
+🔴 **TV6** Server-side cache (60s per symbol+interval) deployed; cache hit-rate visible in Grafana.
+🔴 **TV7** ADR `adr-XXXX-tradingview-signal-source.md` filed with: trade-offs, ToS risk, Plan B (paid TV API or Yahoo Finance fallback).
+🔴 **TV8** Privacy Policy v2026-Q3 + ToS v2026-Q3 + Risk Disclosure v2026-Q3-TV live to users; lawyer-reviewed; in-app re-consent banner for existing users on next login.
+🔴 **TV9** SBOM updated (`sbom-update.md`) with `tradingview-mcp-server@0.7.x` + `tradingview-ta@3.3+`; pinned in lockfile with hashes; CycloneDX artifact archived.
+🔴 **TV10** IR playbooks IR-P2-6 (TV API down) + IR-P2-7 (TV silent wrong data) signed off; tabletop run for at least IR-P2-6.
+🔴 **TV11** Signal `generated_at` embedded at ingest; max-age check (5 min) wired into live-gate; halt on 3 consecutive stale ticks tested.
+🔴 **TV12** TV adapter runs in isolated worker — no access to `broker_credentials`, no access to KEK; egress allowlist (scanner.tradingview.com + api.tradingview.com + internal); verified.
+🔴 **TV13** Multi-TF agreement enforced in default `tv_signal` templates (e.g., 4H + 1H must both indicate same direction).
+🔴 **TV14** UI labels every TV-sourced signal/order with "Source: TradingView (informational, not advice). User chose threshold."
+🟡 **TV15** Cross-source verification plan documented (Phase 4 — Yahoo Finance crosscheck).
+🟡 **TV16** TradingView business team contacted for licensing conversation (post-launch).
 
 ---
 

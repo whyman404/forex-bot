@@ -14,6 +14,7 @@ from app.api import (
     notifications,
     strategies,
     strategy_instances,
+    tradingview,
     users,
 )
 
@@ -35,5 +36,6 @@ api_router.include_router(compliance.router, prefix="/users", tags=["compliance"
 api_router.include_router(notifications.router, prefix="/notifications", tags=["notification"])
 api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
 api_router.include_router(internal.router, prefix="/internal", tags=["internal"])
+api_router.include_router(tradingview.router, prefix="/tv", tags=["tradingview"])
 
 __all__ = ["api_router"]

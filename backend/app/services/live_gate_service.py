@@ -1,8 +1,8 @@
 """Live-trading preflight gate.
 
-Atlas Goro — eight checks must ALL pass before a user can flip a strategy
-instance from paper to live. Failure returns a structured GateResult so the
-UI can show exactly which check needs attention.
+Atlas Goro — eight (now nine, R5) checks must ALL pass before a user can flip
+a strategy instance from paper to live. Failure returns a structured
+GateResult so the UI can show exactly which check needs attention.
 
 Checks:
   1. email_verified_at IS NOT NULL
@@ -13,6 +13,10 @@ Checks:
   6. Signed live-trading agreement for this strategy code (live_consents)
   7. Broker account ≥ min size ($500 forex / $200 crypto)
   8. User-global kill switch NOT armed (no killed instances within 24h)
+  9. (R5) External-service health — if strategy.requires_external_service
+     is true (e.g. tv_signal), the engine's TV upstream must report 'ok' or
+     'degraded'. Status 'down' fails the gate; the user must wait for
+     recovery rather than start trading on stale signals.
 """
 
 from __future__ import annotations
@@ -149,6 +153,17 @@ class LiveGateService:
             GateCheck(name="kill_switch_clear", passed=ks_ok, detail=ks_detail)
         )
 
+        # 9) External-service health (R5). Only runs when the strategy is
+        # marked requires_external_service. We treat ANY exception during the
+        # health probe as "fail closed" because going live on a strategy whose
+        # signal source we can't verify would be reckless. Cheap and tolerant
+        # of the engine being down — the probe has its own timeout.
+        if getattr(strategy, "requires_external_service", False):
+            ext_ok, ext_detail = await self._external_service_healthy(strategy.code)
+            checks.append(
+                GateCheck(name="external_service_healthy", passed=ext_ok, detail=ext_detail)
+            )
+
         failed = [c for c in checks if not c.passed]
         return GateResult(
             passed=len(failed) == 0,
@@ -251,4 +266,42 @@ class LiveGateService:
             return False, (
                 f"Cooldown active — {recent_kills} instance(s) killed in last 24h."
             )
+        return True, None
+
+    async def _external_service_healthy(self, strategy_code: str) -> tuple[bool, str | None]:
+        """R5 — extra gate for strategies that depend on an external signal source.
+
+        Currently this means `tv_signal` → TradingView via trading-engine. The
+        contract is generic: any strategy whose `requires_external_service`
+        column is true funnels through here. If we add more (Polygon, Alpaca
+        sentiment, etc.), wire them in here keyed by code.
+
+        Fail-closed: any exception during the probe blocks live start. We will
+        NOT silently pass a check we couldn't run.
+        """
+        try:
+            if strategy_code == "tv_signal":
+                # Lazy import — avoids circular at module load (gate service is
+                # imported very early in app boot).
+                from app.services.tradingview_service import TradingViewService
+
+                ok, reason = await TradingViewService().is_healthy_for_gate()
+                if not ok:
+                    return False, reason or "TradingView signal source is unhealthy."
+                return True, None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "external_service_health_probe_failed",
+                strategy_code=strategy_code,
+                err=str(exc),
+            )
+            return False, f"Could not verify {strategy_code} signal source health."
+
+        # Strategy claims it needs an external service but we don't know how
+        # to check. Default to PASS (we shouldn't block a strategy because we
+        # forgot to wire a checker), but log loudly so the on-call sees it.
+        logger.warning(
+            "external_service_health_check_missing",
+            strategy_code=strategy_code,
+        )
         return True, None
