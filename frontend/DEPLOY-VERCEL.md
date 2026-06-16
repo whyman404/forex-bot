@@ -66,6 +66,29 @@ patterns in `use-tradingview.ts`.
 
 ---
 
+## Admin panel (`/admin/*`)
+
+The admin route group ships in Round 6. Operational notes:
+
+- **Authorization:** middleware enforces `token.isAdmin === true` at the edge
+  for `/admin/:path*`. The admin `layout.tsx` double-checks client-side and
+  redirects non-admins to `/dashboard?admin_denied=1`. The backend also
+  validates the Bearer token role server-side — this is defence in depth.
+- **TOTP step-up:** destructive actions (impersonate, ban, delete, kill-all,
+  global kill, large broadcasts) call `POST /admin/auth/step-up` first and
+  attach the returned token as `X-Step-Up-TOTP` on the next request. The token
+  is never persisted client-side. Argus R4 owns the backend logic.
+- **Audit log export:** `GET /admin/audit-log/export.csv` is streamed via
+  authenticated `fetch` and downloaded with a synthetic `<a download>` so we
+  don't leak the token through a static URL the browser might cache.
+- **Health probes:** `/admin/system/dependencies` is polled every 30 seconds.
+  We DO NOT retry on failure — failures are the signal we want surfaced.
+- **Impersonation:** opens a new tab at `/impersonate#token=…` so the access
+  token rides the URL hash (never sent to the server, not stored in history).
+- **No special env vars** required for the admin panel itself.
+
+---
+
 ## Region selection
 
 `vercel.json` pins to `["sin1", "iad1"]`:

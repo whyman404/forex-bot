@@ -1,6 +1,9 @@
 "use client";
 
+import * as React from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { toast } from "sonner";
 import { Activity, BarChart3, Bell, DollarSign, Sparkles, Wallet } from "lucide-react";
 import { format } from "date-fns";
 import { MetricCard } from "@/components/metric-card";
@@ -22,6 +25,14 @@ export default function DashboardPage() {
   const instances = useDashboardInstances();
   const backtests = useDashboardBacktests(5);
   const unread = useDashboardUnreadNotifications();
+  const searchParams = useSearchParams();
+
+  React.useEffect(() => {
+    // Surfaced when middleware redirected a non-admin from /admin/*.
+    if (searchParams.get("admin_denied") === "1") {
+      toast.error("Admin access required.");
+    }
+  }, [searchParams]);
 
   const activeStrategies =
     instances.data?.filter((s) => s.status === "running").length ?? 0;

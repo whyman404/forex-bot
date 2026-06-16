@@ -116,6 +116,54 @@ The Settings → Privacy tab adds:
 ### Risk disclaimer modal
 `<RiskDisclaimerModal triggerOnMount />` auto-opens once per consent version (tracked in `localStorage`). Mounted in `(app)/layout.tsx` so every first-time signin must acknowledge.
 
+### Admin panel (Round 6)
+The `(admin)` route group at `src/app/(admin)/` powers the operator console at
+`/admin/*`. It is **fully separate** from the user-facing `(app)` group — red
+accents, a permanent "ADMIN MODE — actions are logged" warning bar, its own
+sidebar, and a defence-in-depth role check (middleware + layout effect + backend).
+
+Pages:
+- `/admin/users` — paginated, searchable table; per-row dropdown with View,
+  Edit, Reset password, Impersonate, Ban/Unban, Delete (typed `DELETE-{email}`).
+  Destructive actions require a TOTP step-up token (`X-Step-Up-TOTP` header).
+- `/admin/users/{id}` — profile, subscriptions, brokers (metadata only,
+  credentials NEVER shown), instances, backtests, audit log, consent log.
+- `/admin/audit-log` — chronological timeline with filters (actor, action,
+  target type, date range), payload-expand, CSV export.
+- `/admin/system` — KPI grid (users, MRR, churn, today's activity), queue
+  depths, dependency health (postgres / redis / stripe / email / mt5-bridge /
+  tradingview). Refreshes every 30s.
+- `/admin/strategies` — toggle enabled, change risk rating, edit default params,
+  emergency *kill all instances* (typed `KILL-ALL` + reason + 2FA).
+- `/admin/subscriptions` — filter, cancel, manual grant.
+- `/admin/notifications` — broadcast composer (audience picker, channel,
+  audience estimate, confirm dialog; large email blasts gate behind step-up).
+- `/admin/system/global-kill` — the GLOBAL KILL switch. Live engine count,
+  current state (armed/disarmed + by whom), 2-step typed confirmation +
+  TOTP step-up + multi-admin pending-approval display.
+
+Components (all in `src/components/admin/`):
+- `admin-sidebar`, `user-table`, `user-actions-menu`, `role-badge`,
+  `audit-log-entry`, `dependency-health-badge`,
+  `totp-step-up-modal`, `impersonate-modal`, `reset-password-result-modal`,
+  `broadcast-composer`.
+
+Hooks at `src/hooks/admin/`:
+- `use-admin-users`, `use-admin-audit-log`, `use-admin-metrics`,
+  `use-admin-dep-health`, `use-admin-strategies`, `use-admin-subscriptions`,
+  `use-admin-broadcast`, `use-global-kill-switch`, `use-admin-totp-step-up`.
+
+Routing & auth:
+- `src/middleware.ts` matcher now includes `/admin/:path*`; `authorized`
+  callback requires `token.isAdmin === true`. Non-admins land on `/dashboard`
+  with `?admin_denied=1`, which the dashboard reads to show a toast.
+- `AppTopbar` user menu surfaces *Admin Panel* link when `session.user.isAdmin`.
+- Settings adds an *Admin tools* tab linking to `/admin` for admins.
+
+The backend role flag arrives via `GET /users/me` (`is_admin: boolean`). The
+existing NextAuth JWT already propagates it as `token.isAdmin`, so no extra
+session wiring was needed for Round 6.
+
 ## Adding a new language (i18n)
 The current stub in `src/lib/i18n.ts` serves English only. To add another language:
 1. Copy the `messages.en` object, translate values, expose as `messages.<locale>`.

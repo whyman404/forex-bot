@@ -29,11 +29,13 @@ cd projects/forex-bot
 open http://localhost:3000
 ```
 
-Login `admin@local / changeme123`. Continue reading [Phase 1 below](#phase-1--dev) for prereqs and troubleshooting.
+Login `admin@local / changeme123` for a generic dev account, **or** copy `.env.admin.example` → `.env.admin` (gitignored) with your own `ADMIN_EMAIL` + `ADMIN_PASSWORD`; `scripts/dev.sh` reads it and runs `python -m scripts.seed_admin --from-env` idempotently. **Admin panel** is at `/admin` and is role-gated — set TOTP first via `/settings/security` because destructive ops require step-up TOTP. Full guide: [docs/admin-setup.md](docs/admin-setup.md). Continue reading [Phase 1 below](#phase-1--dev) for prereqs and troubleshooting.
 
 ### Path 2 details — Vercel + Railway (15 min)
 
 Push to GitHub, click deploy on Railway, click deploy on Vercel, paste env vars. The whole walkthrough is in [docs/deployment/15-minute-deploy.md](docs/deployment/15-minute-deploy.md). Use [.env.deploy-checklist.md](.env.deploy-checklist.md) as a printable worksheet.
+
+**Admin bootstrap on Railway:** set `ADMIN_EMAIL` + `ADMIN_PASSWORD` + `ADMIN_FULL_NAME` + `ADMIN_COUNTRY` in the Railway env panel, then in the Railway shell run `python -m scripts.seed_admin --from-env`. Sign in, rotate password at `/settings/security`, enable TOTP. Full guide: [docs/admin-setup.md](docs/admin-setup.md).
 
 ### Path 3 details — Cloud + live trading
 

@@ -92,6 +92,36 @@ async def readyz(request: Request) -> JSONResponse:
     else:
         checks["redis"] = "ok" if redis_ok else "degraded"
 
+    # R6: admin visibility — surface whether a global kill switch is engaged
+    # and whether any admin exists. Cheap: 1 SELECT + 1 redis GET.
+    admin_status: dict[str, Any] = {"present": "unknown", "kill_switch": "unknown"}
+    if db_ok:
+        try:
+            from sqlalchemy import func as _func
+            from sqlalchemy import select as _select
+
+            from app.db.session import SessionLocal as _SL
+            from app.models.user import User as _U
+
+            async with _SL() as _s:
+                count = (
+                    await _s.execute(
+                        _select(_func.count(_U.id)).where(_U.role == "admin", _U.deleted_at.is_(None))
+                    )
+                ).scalar_one()
+            admin_status["present"] = "yes" if (count or 0) > 0 else "no"
+        except Exception:  # noqa: BLE001
+            admin_status["present"] = "error"
+
+    redis_client = getattr(request.app.state, "redis", None)
+    if redis_client is not None:
+        try:
+            v = await redis_client.get("admin:kill_switch:global")
+            admin_status["kill_switch"] = "engaged" if v else "disarmed"
+        except Exception:  # noqa: BLE001
+            admin_status["kill_switch"] = "unknown"
+    checks["admin"] = admin_status
+
     return JSONResponse(
         status_code=200 if ok else 503,
         content={"status": "ok" if ok else "degraded", "checks": checks},

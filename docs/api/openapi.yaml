@@ -859,6 +859,7 @@ paths:
     get:
       tags: [admin]
       summary: Admin ping (role-gated)
+      security: [{ bearerAuth: [] }]
       responses:
         '200':
           description: Pong
@@ -867,6 +868,237 @@ paths:
               schema: { $ref: '#/components/schemas/MessageResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/users:
+    get:
+      tags: [admin]
+      summary: List users (paginated, filterable, N+1 safe)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { in: query, name: q,        schema: { type: string, maxLength: 200 } }
+        - { in: query, name: role,     schema: { type: string, enum: [user, admin] } }
+        - { in: query, name: status,   schema: { type: string, enum: [active, banned] } }
+        - { in: query, name: page,     schema: { type: integer, minimum: 1, default: 1 } }
+        - { in: query, name: per_page, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { in: query, name: sort,     schema: { type: string, enum: [created_at, last_login_at], default: created_at } }
+      responses:
+        '200':
+          description: Paginated users
+          content: { application/json: { schema: { $ref: '#/components/schemas/PaginatedUserAdminSummary' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/users/{user_id}:
+    get:
+      tags: [admin]
+      summary: User detail (subs, brokers, instances, recent backtests, consents)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ in: path, name: user_id, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200':
+          description: User detail
+          content: { application/json: { schema: { $ref: '#/components/schemas/UserAdminDetail' } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [admin]
+      summary: Patch user (role/full_name/country/email_verified/is_banned)
+      description: |
+        Cannot demote/ban/delete self.
+        `is_banned=true` requires `X-Step-Up-TOTP` header.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { in: path, name: user_id, required: true, schema: { type: string, format: uuid } }
+        - { in: header, name: X-Step-Up-TOTP, required: false, schema: { type: string, pattern: '^\\d{6}$' } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/UserPatchAdmin' } } }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/UserAdminSummary' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    delete:
+      tags: [admin]
+      summary: Soft delete user; cancels subs + kills engines (REQUIRES STEP-UP TOTP)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { in: path, name: user_id, required: true, schema: { type: string, format: uuid } }
+        - { in: header, name: X-Step-Up-TOTP, required: true, schema: { type: string, pattern: '^\\d{6}$' } }
+      responses:
+        '200': { description: Deleted, content: { application/json: { schema: { $ref: '#/components/schemas/MessageResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/users/{user_id}/reset-password:
+    post:
+      tags: [admin]
+      summary: Generate temp password (returned ONCE)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ in: path, name: user_id, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Temp password, content: { application/json: { schema: { $ref: '#/components/schemas/ResetPasswordResponse' } } } }
+
+  /admin/users/{user_id}/impersonate:
+    post:
+      tags: [admin]
+      summary: Mint 5-min access token as target user (REQUIRES STEP-UP TOTP)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { in: path, name: user_id, required: true, schema: { type: string, format: uuid } }
+        - { in: header, name: X-Step-Up-TOTP, required: true, schema: { type: string, pattern: '^\\d{6}$' } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ImpersonationRequest' } } }
+      responses:
+        '200': { description: Token, content: { application/json: { schema: { $ref: '#/components/schemas/ImpersonationResponse' } } } }
+
+  /admin/users/{user_id}/grant-plan:
+    post:
+      tags: [admin]
+      summary: Grant a subscription plan (override; e.g. refund or beta)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ in: path, name: user_id, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/GrantPlanRequest' } } }
+      responses:
+        '200': { description: Granted, content: { application/json: { schema: { $ref: '#/components/schemas/SubscriptionAdminMini' } } } }
+
+  /admin/subscriptions:
+    get:
+      tags: [admin]
+      summary: List subscriptions
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { in: query, name: status, schema: { type: string, enum: [active, past_due, canceled, trialing] } }
+        - { in: query, name: plan,   schema: { type: string } }
+        - { in: query, name: page,     schema: { type: integer, minimum: 1, default: 1 } }
+        - { in: query, name: per_page, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+      responses:
+        '200': { description: Paginated subs, content: { application/json: { schema: { $ref: '#/components/schemas/PaginatedSubscriptionAdminMini' } } } }
+
+  /admin/subscriptions/{sub_id}/cancel:
+    post:
+      tags: [admin]
+      summary: Admin override — cancel subscription
+      security: [{ bearerAuth: [] }]
+      parameters: [{ in: path, name: sub_id, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Canceled, content: { application/json: { schema: { $ref: '#/components/schemas/SubscriptionAdminMini' } } } }
+
+  /admin/audit-log:
+    get:
+      tags: [admin]
+      summary: Browse audit log
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { in: query, name: actor_id,    schema: { type: string, format: uuid } }
+        - { in: query, name: action,      schema: { type: string, maxLength: 64 } }
+        - { in: query, name: target_type, schema: { type: string, maxLength: 32 } }
+        - { in: query, name: since,       schema: { type: string, format: date-time } }
+        - { in: query, name: until,       schema: { type: string, format: date-time } }
+        - { in: query, name: page,        schema: { type: integer, minimum: 1, default: 1 } }
+        - { in: query, name: per_page,    schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+      responses:
+        '200': { description: Paginated entries, content: { application/json: { schema: { $ref: '#/components/schemas/PaginatedAuditLogEntry' } } } }
+
+  /admin/audit-log/{entry_id}:
+    get:
+      tags: [admin]
+      summary: Full audit entry payload
+      security: [{ bearerAuth: [] }]
+      parameters: [{ in: path, name: entry_id, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Entry, content: { application/json: { schema: { $ref: '#/components/schemas/AuditLogEntry' } } } }
+
+  /admin/metrics:
+    get:
+      tags: [admin]
+      summary: KPI snapshot (MRR, churn, queue depth, engine counts)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Snapshot, content: { application/json: { schema: { $ref: '#/components/schemas/AdminMetricsSnapshot' } } } }
+
+  /admin/health/dependencies:
+    get:
+      tags: [admin]
+      summary: Per-dependency health (postgres, redis, stripe, email, bridges)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Health, content: { application/json: { schema: { $ref: '#/components/schemas/DependencyHealth' } } } }
+
+  /admin/strategies:
+    get:
+      tags: [admin]
+      summary: List all strategies (including disabled)
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: Strategies, content: { application/json: { schema: { type: array, items: { type: object } } } } } }
+
+  /admin/strategies/{code}:
+    patch:
+      tags: [admin]
+      summary: Patch strategy (enable/disable, risk_rating, default_params)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ in: path, name: code, required: true, schema: { type: string } }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/StrategyAdminPatch' } } } }
+      responses: { '200': { description: Updated, content: { application/json: { schema: { type: object } } } } }
+
+  /admin/strategies/{code}/kill-all-instances:
+    post:
+      tags: [admin]
+      summary: Emergency — kill every running instance of this strategy (REQUIRES STEP-UP TOTP)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { in: path, name: code, required: true, schema: { type: string } }
+        - { in: header, name: X-Step-Up-TOTP, required: true, schema: { type: string, pattern: '^\\d{6}$' } }
+      responses: { '200': { description: Killed, content: { application/json: { schema: { $ref: '#/components/schemas/KillAllResponse' } } } } }
+
+  /admin/mt5-bridges:
+    get:
+      tags: [admin]
+      summary: List MT5 bridges + heartbeat status
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: Bridges, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Mt5BridgeStatus' } } } } } }
+
+  /admin/mt5-bridges/{bridge_id}/probe:
+    post:
+      tags: [admin]
+      summary: Force health probe
+      security: [{ bearerAuth: [] }]
+      parameters: [{ in: path, name: bridge_id, required: true, schema: { type: string, format: uuid } }]
+      responses: { '200': { description: Probed, content: { application/json: { schema: { $ref: '#/components/schemas/ProbeResponse' } } } } }
+
+  /admin/notifications/broadcast:
+    post:
+      tags: [admin]
+      summary: Broadcast notification to audience (rate limited 1/5min; email-all needs STEP-UP TOTP)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ in: header, name: X-Step-Up-TOTP, required: false, schema: { type: string, pattern: '^\\d{6}$' } }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/BroadcastRequest' } } } }
+      responses:
+        '200': { description: Queued, content: { application/json: { schema: { $ref: '#/components/schemas/BroadcastResponse' } } } }
+        '429': { description: Rate limited, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+
+  /admin/system/global-kill-switch:
+    get:
+      tags: [admin]
+      summary: Kill-switch current status
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: Status, content: { application/json: { schema: { $ref: '#/components/schemas/KillSwitchStatus' } } } } }
+    post:
+      tags: [admin]
+      summary: Engage GLOBAL kill switch (2-of-N approval when multiple admins) (REQUIRES STEP-UP TOTP)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ in: header, name: X-Step-Up-TOTP, required: true, schema: { type: string, pattern: '^\\d{6}$' } }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/KillSwitchRequest' } } } }
+      responses: { '200': { description: Engaged or pending, content: { application/json: { schema: { $ref: '#/components/schemas/KillSwitchStatus' } } } } }
+
+  /admin/system/global-kill-switch/disarm:
+    post:
+      tags: [admin]
+      summary: Disarm GLOBAL kill switch (same 2-of-N rule) (REQUIRES STEP-UP TOTP)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ in: header, name: X-Step-Up-TOTP, required: true, schema: { type: string, pattern: '^\\d{6}$' } }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/KillSwitchRequest' } } } }
+      responses: { '200': { description: Disarmed or pending, content: { application/json: { schema: { $ref: '#/components/schemas/KillSwitchStatus' } } } } }
 
 components:
   securitySchemes:
@@ -1397,3 +1629,227 @@ components:
         body: { type: string }
         is_read: { type: boolean }
         created_at: { type: string, format: date-time }
+
+    # ============== Admin (R6) ==============
+    UserAdminSummary:
+      type: object
+      required: [id, email, full_name, country, role, created_at, broker_count, strategy_instance_count]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        full_name: { type: string }
+        country: { type: string, minLength: 2, maxLength: 2 }
+        role: { type: string, enum: [user, admin] }
+        created_at: { type: string, format: date-time }
+        email_verified_at: { type: string, format: date-time, nullable: true }
+        last_login_at: { type: string, format: date-time, nullable: true }
+        is_banned: { type: boolean }
+        deleted_at: { type: string, format: date-time, nullable: true }
+        subscription_status: { type: string, nullable: true }
+        subscription_plan: { type: string, nullable: true }
+        broker_count: { type: integer, minimum: 0 }
+        strategy_instance_count: { type: integer, minimum: 0 }
+    PaginatedUserAdminSummary:
+      type: object
+      required: [items, total, page, page_size]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/UserAdminSummary' } }
+        total: { type: integer, minimum: 0 }
+        page: { type: integer, minimum: 1 }
+        page_size: { type: integer, minimum: 1 }
+    SubscriptionAdminMini:
+      type: object
+      required: [id, plan, status]
+      properties:
+        id: { type: string, format: uuid }
+        plan: { type: string }
+        status: { type: string }
+        current_period_end: { type: string, format: date-time, nullable: true }
+    PaginatedSubscriptionAdminMini:
+      type: object
+      required: [items, total, page, page_size]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/SubscriptionAdminMini' } }
+        total: { type: integer }
+        page: { type: integer }
+        page_size: { type: integer }
+    BrokerAdminMini:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        broker: { type: string }
+        account_label: { type: string }
+        is_active: { type: boolean }
+        last_sync_at: { type: string, format: date-time, nullable: true }
+    StrategyInstanceAdminMini:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        label: { type: string }
+        status: { type: string }
+        kill_switch_armed: { type: boolean }
+        started_at: { type: string, format: date-time, nullable: true }
+    BacktestAdminMini:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string }
+        asset_symbol: { type: string }
+        timeframe: { type: string }
+        created_at: { type: string, format: date-time }
+    UserAdminDetail:
+      allOf:
+        - $ref: '#/components/schemas/UserAdminSummary'
+        - type: object
+          properties:
+            subscriptions: { type: array, items: { $ref: '#/components/schemas/SubscriptionAdminMini' } }
+            broker_accounts: { type: array, items: { $ref: '#/components/schemas/BrokerAdminMini' } }
+            strategy_instances: { type: array, items: { $ref: '#/components/schemas/StrategyInstanceAdminMini' } }
+            recent_backtests: { type: array, items: { $ref: '#/components/schemas/BacktestAdminMini' } }
+            consents: { type: array, items: { type: object } }
+    UserPatchAdmin:
+      type: object
+      properties:
+        role: { type: string, enum: [user, admin], nullable: true }
+        full_name: { type: string, maxLength: 200, nullable: true }
+        country: { type: string, minLength: 2, maxLength: 2, nullable: true }
+        email_verified: { type: boolean, nullable: true }
+        is_banned: { type: boolean, nullable: true }
+    ResetPasswordResponse:
+      type: object
+      required: [user_id, temporary_password]
+      properties:
+        user_id: { type: string, format: uuid }
+        temporary_password: { type: string }
+        must_change_on_next_login: { type: boolean }
+    ImpersonationRequest:
+      type: object
+      required: [totp_code]
+      properties:
+        totp_code: { type: string, pattern: '^\d{6}$' }
+    ImpersonationResponse:
+      type: object
+      required: [access_token, token_type, expires_in_seconds, impersonated_user_id, impersonator_id]
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, enum: [bearer] }
+        expires_in_seconds: { type: integer }
+        impersonated_user_id: { type: string, format: uuid }
+        impersonator_id: { type: string, format: uuid }
+    GrantPlanRequest:
+      type: object
+      required: [plan_code, reason]
+      properties:
+        plan_code: { type: string, enum: [trial, pro_monthly, pro_yearly, lifetime] }
+        duration_days: { type: integer, minimum: 1, maximum: 3650, nullable: true }
+        reason: { type: string, minLength: 1, maxLength: 500 }
+    AuditLogEntry:
+      type: object
+      required: [id, action, created_at, payload_redacted]
+      properties:
+        id: { type: string, format: uuid }
+        actor_user_id: { type: string, format: uuid, nullable: true }
+        action: { type: string }
+        target_type: { type: string, nullable: true }
+        target_id: { type: string, format: uuid, nullable: true }
+        payload_redacted: { type: object }
+        ip_addr: { type: string, nullable: true }
+        user_agent: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+    PaginatedAuditLogEntry:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/AuditLogEntry' } }
+        total: { type: integer }
+        page: { type: integer }
+        page_size: { type: integer }
+    AdminMetricsSnapshot:
+      type: object
+      required: [users_total, captured_at]
+      properties:
+        users_total: { type: integer }
+        users_active_7d: { type: integer }
+        users_new_7d: { type: integer }
+        subs_active_count: { type: integer }
+        mrr_estimate_cents: { type: integer }
+        churn_30d_pct: { type: number }
+        backtests_today: { type: integer }
+        signals_today: { type: integer }
+        trades_today: { type: integer }
+        gross_pnl_today_cents: { type: integer }
+        live_engines_running: { type: integer }
+        kill_switches_armed: { type: integer }
+        email_queue_depth: { type: integer }
+        backtest_queue_depth: { type: integer }
+        captured_at: { type: string, format: date-time }
+    DependencyStatus:
+      type: object
+      properties:
+        name: { type: string }
+        status: { type: string, enum: [ok, degraded, fail, not_configured, unknown] }
+        last_check: { type: string, format: date-time }
+        detail: { type: string, nullable: true }
+        latency_ms: { type: number, nullable: true }
+    DependencyHealth:
+      type: object
+      properties:
+        overall: { type: string, enum: [ok, degraded, fail] }
+        dependencies: { type: array, items: { $ref: '#/components/schemas/DependencyStatus' } }
+    StrategyAdminPatch:
+      type: object
+      properties:
+        is_enabled: { type: boolean, nullable: true }
+        risk_rating: { type: string, enum: [low, medium, high], nullable: true }
+        default_params: { type: object, nullable: true }
+    KillAllResponse:
+      type: object
+      properties:
+        strategy_code: { type: string }
+        instances_killed: { type: integer }
+    Mt5BridgeStatus:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        broker: { type: string }
+        account_label: { type: string }
+        is_active: { type: boolean }
+        last_sync_at: { type: string, format: date-time, nullable: true }
+        heartbeat_age_seconds: { type: integer, nullable: true }
+        status: { type: string, enum: [ok, stale, down, unknown] }
+    ProbeResponse:
+      type: object
+      properties:
+        bridge_id: { type: string, format: uuid }
+        status: { type: string, enum: [ok, fail] }
+        detail: { type: string, nullable: true }
+        probed_at: { type: string, format: date-time }
+    BroadcastRequest:
+      type: object
+      required: [title, body, audience]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 120 }
+        body: { type: string, minLength: 1, maxLength: 4000 }
+        audience: { type: string, enum: [all, active, user, admin, pro_monthly, pro_yearly, lifetime, trial] }
+        channel: { type: string, enum: [inapp, email] }
+    BroadcastResponse:
+      type: object
+      properties:
+        queued_count: { type: integer }
+        audience: { type: string }
+        channel: { type: string }
+    KillSwitchRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 500 }
+    KillSwitchStatus:
+      type: object
+      properties:
+        engaged: { type: boolean }
+        engaged_at: { type: string, format: date-time, nullable: true }
+        engaged_by: { type: array, items: { type: string, format: uuid } }
+        reason: { type: string, nullable: true }
+        approvers_required: { type: integer }
+        approvers_collected: { type: integer }
+        pending: { type: boolean }

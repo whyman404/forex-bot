@@ -1,8 +1,19 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { toast } from "sonner";
-import { Bell, Download, FileLock2, KeyRound, ShieldCheck, Trash2, UserRound } from "lucide-react";
+import {
+  Bell,
+  Download,
+  ExternalLink,
+  FileLock2,
+  KeyRound,
+  ShieldAlert,
+  ShieldCheck,
+  Trash2,
+  UserRound,
+} from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -126,6 +137,12 @@ export default function SettingsPage() {
             <FileLock2 className="mr-2 h-4 w-4" aria-hidden="true" />
             Privacy
           </TabsTrigger>
+          {me.data?.is_admin && (
+            <TabsTrigger value="admin">
+              <ShieldAlert className="mr-2 h-4 w-4 text-destructive" aria-hidden="true" />
+              Admin tools
+            </TabsTrigger>
+          )}
         </TabsList>
 
         <TabsContent value="account">
@@ -352,6 +369,30 @@ export default function SettingsPage() {
             </CardContent>
           </Card>
         </TabsContent>
+
+        {me.data?.is_admin && (
+          <TabsContent value="admin">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <ShieldAlert className="h-5 w-5 text-destructive" aria-hidden="true" />
+                  Admin tools
+                </CardTitle>
+                <CardDescription>
+                  You have elevated permissions. Actions in the admin panel are logged and audited.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Button asChild variant="destructive">
+                  <Link href="/admin">
+                    <ExternalLink className="mr-2 h-4 w-4" aria-hidden="true" />
+                    Open Admin Panel
+                  </Link>
+                </Button>
+              </CardContent>
+            </Card>
+          </TabsContent>
+        )}
       </Tabs>
 
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>

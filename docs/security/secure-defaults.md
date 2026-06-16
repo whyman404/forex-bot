@@ -408,3 +408,21 @@ When the team finds a gotcha not covered here, add it. Sec defaults grow with th
   6. kyc_tier sufficient
   7. jurisdiction allowed
 - **When in doubt → pause, not trade.**
+
+## 18. Phase 3.5 — Admin Privileged Access Rules (added 2026-06-16)
+
+> Authoritative defaults for `/api/v1/admin/*` endpoints. Read with `admin-security.md` (full spec) and `threat-model-admin.md` (STRIDE).
+
+- **`require_admin` middleware reloads role from DB on every request.** JWT `role` claim is ignored. This detects concurrent demotion within ~50ms (race window covered by Redis pub/sub `revoked_admins`).
+- **Step-up TOTP** required for every destructive admin op: impersonate, delete user, ban user, broadcast email, global-kill, role change, sub override. Header `X-Step-Up-TOTP`. 5-min lifetime, single-use (Redis SETNX), bound to action+target hash.
+- **Multi-admin approval (n-of-m)** required for top-tier: global kill switch, demote/ban/delete another admin, bulk delete > 50, mass broadcast > 10k, KEK rotation, full audit export. Approval expires 15min. Approver ≠ initiator.
+- **All admin actions audited** via append-only `audit_log` table. App role granted INSERT+SELECT only — no UPDATE/DELETE. Daily hash-chain integrity check. PII redacted via central `redact_pii()` helper.
+- **Admin session limit 24h.** Cron revokes admin tokens older than 24h. JTI denylist for revoked sessions.
+- **No admin tokens in localStorage.** NextAuth httpOnly+SameSite=strict cookies only.
+- **Impersonation token** (`type=impersonation`) cannot perform destructive user actions, broker credential changes, mode flips, or any `/admin/*` endpoint. Cannot impersonate admins or self.
+- **Self-protection rules** (absolute): cannot demote/ban/delete self, disable own TOTP, impersonate self, approve own multi-admin request.
+- **IP allowlist optional** via `ADMIN_IP_ALLOWLIST` (CIDR). Breakglass via `ADMIN_BREAKGLASS=true` env grants 30-min window on process boot; every request logs `breakglass_active=true` + alert.
+- **No mass-assign on user PATCH.** Role/is_active/balance/totp_secret never in body parser allowlist. Role change has dedicated endpoint with step-up + (if target is admin) multi-admin.
+- **First admin force-password-change** at first login. `users.force_password_change` blocks all endpoints except `POST /me/password` until cleared. TOTP enrollment also forced before granting admin privileges.
+- **Anomaly detection** on admin sessions: new country / UA / Tor → email + Slack alert. > 50 req/min → throttle. Step-up TOTP fail x3 in 5min → lock 30min + alert.
+- **Route-tree mount pattern**: `APIRouter(prefix="/api/v1/admin", dependencies=[Depends(require_admin)])`. Sub-routers inherit; CI lint asserts no handler under `/admin/*` lacks the dependency.

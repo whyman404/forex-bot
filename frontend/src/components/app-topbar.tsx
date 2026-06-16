@@ -1,8 +1,9 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
-import { LogOut, Menu, ShieldAlert, User as UserIcon } from "lucide-react";
+import { LogOut, Menu, ShieldAlert, ShieldCheck, User as UserIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -76,6 +77,14 @@ export function AppTopbar() {
               </div>
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
+            {session?.user?.isAdmin && (
+              <DropdownMenuItem asChild>
+                <Link href="/admin">
+                  <ShieldCheck className="mr-2 h-4 w-4 text-destructive" aria-hidden="true" />
+                  Admin Panel
+                </Link>
+              </DropdownMenuItem>
+            )}
             <DropdownMenuItem onSelect={() => signOut({ callbackUrl: "/login" })}>
               <LogOut className="mr-2 h-4 w-4" aria-hidden="true" />
               Sign out

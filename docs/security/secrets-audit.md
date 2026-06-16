@@ -199,6 +199,41 @@ When activated:
 | 15 | CI OIDC | Ephemeral | Per-job | Argus + Hestia |
 | 16 | Admin PW manager + 2FA | Catastrophic | Yearly | Founder |
 | 17 | Registrar PW + 2FA | Catastrophic (DNS) | Yearly | Founder |
+| 18 | ADMIN_PASSWORD (seed only) | High (transient) | One-shot, rotate at first login | Argus + Founder |
+| 19 | ADMIN_IP_ALLOWLIST (CIDR list, optional) | Config (not secret per se) | On office IP change | Argus + Hestia |
+| 20 | ADMIN_BREAKGLASS (env, off by default) | Operational | Per-incident | Argus + Hestia |
+| 21 | Admin TOTP secrets (per admin, in DB encrypted) | Catastrophic | Per-admin enrollment; rotate on suspicion | Each admin + Argus |
+| 22 | Step-up TOTP Redis state (per-code keys) | Ephemeral (300s TTL) | Auto | Argus |
+| 23 | Multi-admin approval signing key (if used for payload hash) | High | Quarterly | Argus |
+
+### 2.18 ADMIN_PASSWORD — Seed-only secret
+
+- **Purpose:** First admin bootstrap via `seed_admin.py` only. NEVER used post-first-login.
+- **Lifecycle:** Set in env once → seed script reads → DB stores Argon2id hash → script exits → env var unset/rotated.
+- **At first login:** `force_password_change=true` blocks all endpoints except `POST /me/password`. UI forces password change before any admin action.
+- **Current seed value `.Master6728`:** length 11 (below recommended 12), contains common word "Master". Seed script emits WARNING but does NOT block (borderline). 🔴 **Mandatory:** rotate at first login. Document new password in 1Password/Bitwarden.
+- **Weak-password policy:** seed_admin.py blocks (requires `--allow-weak` flag) if password is in top-10k common list OR fully dictionary-based. Warn-only for length/composition borderlines.
+
+### 2.19 ADMIN_IP_ALLOWLIST — Operational config
+
+- Comma-separated CIDR list (e.g. `203.0.113.0/24,198.51.100.42/32`).
+- Empty/unset = allowlist disabled. **Production recommended:** always set.
+- Source IP from reverse proxy: trust `X-Forwarded-For` only when from trusted proxy (Cloudflare ranges); else use raw `request.client.host`.
+- Behind Cloudflare: prefer Cloudflare Access policy as outer layer + ADMIN_IP_ALLOWLIST as inner defense in depth.
+
+### 2.20 ADMIN_BREAKGLASS — Emergency switch
+
+- `ADMIN_BREAKGLASS=true` grants a 30-min window from process boot to bypass IP allowlist.
+- Step-up TOTP and multi-admin approval STILL enforced (fails-closed in defense).
+- Every request during window logs `breakglass_active=true` + alert to Slack #security-incidents + email all admins.
+- Post-incident: must be reviewed and justified within 24h.
+
+### 2.21 Admin TOTP secrets — Per-admin, DB encrypted
+
+- Stored in `users.totp_secret_encrypted` (envelope-encrypted with KEK like broker creds).
+- Backup codes (8 single-use) hashed and stored separately; shown once at enrollment.
+- Never logged. Never in API response body (Pydantic exclude).
+- Rotation: on suspicion (laptop loss, password compromise, departure), or admin's choice.
 
 ---
 

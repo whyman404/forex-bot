@@ -254,6 +254,29 @@
 
 ---
 
+## Section ADMIN — Phase 3.5 Admin Privileged Access (added 2026-06-16)
+
+🔴 **AD1** `require_admin` middleware re-fetches role from DB every request (JWT role claim ignored). Integration test in CI.
+🔴 **AD2** Step-up TOTP enforced on every destructive admin op (impersonate, delete user, ban, broadcast, kill, role change, sub override). Test matrix covers each.
+🔴 **AD3** Audit log table is append-only (DB role: INSERT+SELECT only for app user). Daily hash-chain integrity check job scheduled.
+🔴 **AD4** First admin (seeded) has rotated password from seed value `.Master6728` (length 11, borderline weak — must be replaced).
+🔴 **AD5** First admin has enrolled TOTP + downloaded backup codes (stored in password manager).
+🔴 **AD6** Self-protection rules verified: cannot demote/ban/delete self, cannot disable own TOTP, cannot impersonate self, cannot approve own multi-admin request.
+🔴 **AD7** Impersonation token blocks destructive ops + `/admin/*` + impersonation of admin/self. Test matrix covers each restriction.
+🔴 **AD8** Multi-admin approval (n=2) implemented for: global kill switch, demote/ban/delete another admin, bulk delete > 50, mass broadcast > 10k, KEK rotation.
+🟡 **AD9** At least 2 admins provisioned post-launch (avoid single-point-of-failure for multi-approval). Strongly recommended within 30 days.
+🟡 **AD10** `ADMIN_IP_ALLOWLIST` configured for production (office + on-call home network CIDRs).
+🟡 **AD11** Weekly audit log review process scheduled (owner: Argus + second admin). Calendar invite created.
+🟡 **AD12** Quarterly admin access review process scheduled (revoke dormant, re-attest acceptable use).
+🟡 **AD13** Anomaly detection (new country, UA, Tor) connected to Slack #security-incidents + email.
+🟡 **AD14** Admin onboarding runbook (`/docs/security/admin-onboarding-runbook.md`) shared with all admins; signed acceptable use on file.
+🟡 **AD15** Cron job revoking admin tokens > 24h scheduled and tested.
+🟡 **AD16** Breakglass procedure tabletop-tested (don't activate in prod for drill; walk through).
+🟡 **AD17** Threat model `/docs/security/threat-model-admin.md` reviewed by Daedalus + Atlas + Eos.
+🟡 **AD18** Incident response `/docs/security/incident-response-admin.md` reviewed; on-call PagerDuty schedule populated.
+
+---
+
 ## Section I — Insurance / Liability
 
 🟡 **I1** Cyber insurance quote obtained (even if not bound yet).

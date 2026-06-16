@@ -1,11 +1,12 @@
 # Forex Bot — Honest Status
 
-> Last review: 2026-06-16 (Hephaestus Takumi, Phase 3 TradingView integration review)
+> Last review: 2026-06-16 (Hephaestus Takumi, Phase 3.5 Admin Panel review)
 > Audience: project sponsor + first prod operator
 > Previous: see `docs/project/integration-review.md` (Phase 1),
 > `docs/project/integration-review-phase2.md` (Phase 2),
-> `docs/project/integration-review-phase2.5.md` (Phase 2.5), and
-> `docs/project/integration-review-phase3.md` (this round).
+> `docs/project/integration-review-phase2.5.md` (Phase 2.5),
+> `docs/project/integration-review-phase3.md` (Phase 3), and
+> `docs/project/integration-review-phase3.5.md` (this round).
 
 ## Deploy targets supported
 
@@ -77,6 +78,18 @@
 | Frontend strategy detail + score bar + TF table | OK | `/strategies/tv_signal`; auto-refresh preview 60 s; health polled 30 s. |
 | Risk disclaimer v1.1.0 (TV liability addendum) | OK | "Signals are informational, not financial advice"; consent re-prompts on bump. |
 | Argus Section TV launch checklist (14 gates) | OK | Must be signed off before flipping any tv_signal instance live. Paper-only by default. |
+
+### Phase 3.5 (Admin Panel + role-gated admin API)
+
+| Capability | Status | Notes |
+|---|---|---|
+| Admin Panel UI (8 pages, role-gated) | OK | `/admin/users`, `/admin/users/[id]`, `/admin/audit-log`, `/admin/system`, `/admin/strategies`, `/admin/subscriptions`, `/admin/notifications`, `/admin/system/global-kill`. Middleware + layout double-gate on `token.isAdmin`. |
+| Admin API (22 endpoints) | OK | `/api/v1/admin/users`, `…/audit-log`, `…/system/metrics`, `…/system/dependencies`, `…/strategies`, `…/subscriptions`, `…/broadcast`, `…/system/global-kill`, `…/auth/step-up`. All gated by `require_admin` (re-fetches role from DB → catches role change since token mint). |
+| Step-up TOTP on destructive ops | OK | Header `X-Step-Up-TOTP` (digit code) re-verified against admin's TOTP secret. Applied to ban / delete / impersonate / reset-password / grant subscription / kill-all strategy / global-kill engage / disarm / broadcast. |
+| Audit log atomicity | OK | Audit row written **inside** the same DB tx as the mutation — cannot orphan. |
+| First-admin seed via env | OK | `python -m scripts.seed_admin --from-env` reads `ADMIN_EMAIL` + `ADMIN_PASSWORD`; idempotent. Local dev reads `.env.admin` (gitignored). |
+| Admin security pack (Argus R4) | OK | `admin-security.md`, `threat-model-admin.md` (STRIDE + 10 scenarios), `incident-response-admin.md`, `admin-onboarding-runbook.md`, secure-defaults §18, AD1-AD18 launch gates. |
+| Admin docs (Hephaestus R5) | OK | `docs/admin-setup.md` single-source onboarding; this section + `docs/project/integration-review-phase3.5.md`. |
 
 ## What is Stub / Mock
 
