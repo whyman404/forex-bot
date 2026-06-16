@@ -98,6 +98,8 @@ const nextConfig: NextConfig = {
   output: "standalone",
   poweredByHeader: false,
   compress: true,
+  // Lint warnings should not fail Vercel deploy; CI lint job catches them on push.
+  eslint: { ignoreDuringBuilds: true },
   // SWC minification is the default in Next 15; flag kept implicit.
   productionBrowserSourceMaps: false,
   experimental: {
